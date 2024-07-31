@@ -1,8 +1,13 @@
 {
   "name": "node-red-contrib-webiq",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Node-RED nodes for WebIQ API integration",
   "main": "webiq-api-connect.js",
+  "keywords": [
+    "node-red",
+    "webiq",
+    "iot"
+  ],
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -16,5 +21,13 @@
       "webiq-api-connect": "webiq-api-connect.js",
       "api-request": "api-request.js"
     }
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DanteDevOps/node-red-contrib-webiq.git"
+  },
+  "bugs": {
+    "url": "https://github.com/DanteDevOps/node-red-contrib-webiq/issues"
+  },
+  "homepage": "https://github.com/DanteDevOps/node-red-contrib-webiq#readme"
 }
