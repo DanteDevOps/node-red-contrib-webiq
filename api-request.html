@@ -1,0 +1,46 @@
+<script type="text/javascript">
+    RED.nodes.registerType('api-request', {
+        category: 'webiq',
+        color: '#C0DEED',
+        defaults: {
+            name: {value: ""},
+            cmd: {value: ""},
+            id: {value: ""},
+            data: {value: ""},
+            interval: {value: 0}
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "envelope.svg",
+        label: function () {
+            return this.name || "API Request";
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="api-request">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+    <div class="form-row">
+        <label for="node-input-cmd"><i class="fa fa-code"></i> Command</label>
+        <input type="text" id="node-input-cmd" placeholder="Command">
+    </div>
+    <div class="form-row">
+        <label for="node-input-id"><i class="fa fa-id-card"></i> ID</label>
+        <input type="text" id="node-input-id" placeholder="ID">
+    </div>
+    <div class="form-row">
+        <label for="node-input-data"><i class="fa fa-database"></i> Data</label>
+        <input type="text" id="node-input-data" placeholder="Data">
+    </div>
+    <div class="form-row">
+        <label for="node-input-interval"><i class="fa fa-clock-o"></i> Interval (ms)</label>
+        <input type="number" id="node-input-interval" placeholder="Interval in ms">
+    </div>
+</script>
+
+<script type="text/html" data-help-name="api-request">
+    <p>This node injects command, id, and data into the payload.</p>
+</script>
