@@ -14,6 +14,7 @@
   "author": "DanteDevOps",
   "license": "MIT",
   "dependencies": {
+    "node-red-contrib-webiq": "^1.0.5",
     "ws": "^8.0.0"
   },
   "engines": {
