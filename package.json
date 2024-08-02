@@ -14,7 +14,6 @@
   "author": "DanteDevOps",
   "license": "MIT",
   "dependencies": {
-    "node-red-contrib-webiq": "^1.0.3",
     "ws": "^8.0.0"
   },
   "engines": {
@@ -29,7 +28,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/DanteDevOps/node-red-contrib-webiq.git"
+    "url": "https://github.com/DanteDevOps/node-red-contrib-webiq.git"
   },
   "bugs": {
     "url": "https://github.com/DanteDevOps/node-red-contrib-webiq/issues"
