@@ -1,6 +1,6 @@
 {
   "name": "node-red-contrib-webiq",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "description": "Node-RED nodes for WebIQ API integration.",
   "main": "webiq-api-connect.js",
   "scripts": {
