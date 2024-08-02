@@ -1,0 +1,99 @@
+[
+  {
+    "id": "cbe1f60c82c628e4",
+    "type": "tab",
+    "label": "Flow 1",
+    "disabled": false,
+    "info": "",
+    "env": []
+  },
+  {
+    "id": "768238a01596e071",
+    "type": "webiq-api-connect",
+    "z": "cbe1f60c82c628e4",
+    "name": "WebIQ API Connection 1",
+    "host": "localhost",
+    "port": "10123",
+    "project": "ob_Review_11",
+    "username": "admin",
+    "password": "admin",
+    "x": 530,
+    "y": 240,
+    "wires": [
+      [
+        "480e0a27d615e4e5"
+      ]
+    ]
+  },
+  {
+    "id": "0",
+    "type": "api-request",
+    "z": "cbe1f60c82c628e4",
+    "name": "API Request 1",
+    "cmd": "io.read",
+    "data": "[\"DSin\", \"SInt\"]",
+    "interval": 0,
+    "x": 320,
+    "y": 240,
+    "wires": [
+      [
+        "768238a01596e071"
+      ]
+    ]
+  },
+  {
+    "id": "480e0a27d615e4e5",
+    "type": "debug",
+    "z": "cbe1f60c82c628e4",
+    "name": "debug 1",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "false",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 720,
+    "y": 240,
+    "wires": []
+  },
+  {
+    "id": "08ada21e6883c944",
+    "type": "inject",
+    "z": "cbe1f60c82c628e4",
+    "name": "",
+    "props": [
+      {
+        "p": "payload"
+      },
+      {
+        "p": "topic",
+        "vt": "str"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "",
+    "payloadType": "date",
+    "x": 140,
+    "y": 240,
+    "wires": [
+      [
+        "0"
+      ]
+    ]
+  },
+  {
+    "id": "f450e54f0979b1bd",
+    "type": "comment",
+    "z": "cbe1f60c82c628e4",
+    "name": "Comment",
+    "info": "A simple example for using a WebIQ runtime that install in the same PC as you run the NodeRed",
+    "x": 140,
+    "y": 300,
+    "wires": []
+  }
+]
