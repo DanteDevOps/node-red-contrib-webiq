@@ -54,7 +54,7 @@ This project is licensed under the MIT License.
 ## Links
 
 - [Node-RED Flow Library](https://flows.nodered.org/node/node-red-contrib-webiq)
-- [GitHub Repository](https://github.com/YourUsername/node-red-contrib-webiq)
+- [GitHub Repository](https://github.com/DanteDevOps/node-red-contrib-webiq)
 
 ## Contact
 
