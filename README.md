@@ -57,14 +57,6 @@ This project is licensed under the MIT License.
 - [GitHub Repository](https://github.com/DanteDevOps/node-red-contrib-webiq)
 
 
-06061307,kHK4d0RovYefzr-ns3d1Fw,2024-10-10T11:28:13.282274+00:00
-
-06061316,N5XhdbvONi8yljHZzvLs_g,2024-10-10T11:28:13.448957+00:00
-
-06061315,yUFrKY3DyPWnVyh3d5cWZg,2024-10-10T11:28:13.563828+00:00
-
-06061313,-z68Piprn-s8MN3ZtIkmJQ,2024-10-10T11:28:13.674777+00:00
-
 ## Contact
 
 For any questions or issues, please open an issue in the GitHub repository.
