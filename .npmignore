@@ -1,0 +1,11 @@
+# IDE files
+.idea/
+
+# Node modules
+node_modules/
+
+# Git
+.git/
+
+# Logs
+*.log

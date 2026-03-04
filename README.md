@@ -12,7 +12,7 @@ This package is an independent WebIQ Node-RED integration focused on WebSocket r
 To install the nodes, use the following command in your Node-RED user directory (typically `~/.node-red`):
 
 ```bash
-npm install node-red-contrib-webiq-api
+npm install node-red-contrib-webiq
 ```
 
 ## Usage
@@ -40,6 +40,7 @@ npm install node-red-contrib-webiq-api
 
 ```json
 [{"id":"6ae4f887e84999f1","type":"tab","label":"Flow 1","disabled":false,"info":"","env":[]},{"id":"9c75c542f1c48c46","type":"webiq-api-connect","z":"6ae4f887e84999f1","name":"","host":"127.0.0.1","port":"10123","project":"f0362a66-4b94-4167-bfcb-1995290ad399","username":"Worker","password":"worker","x":540,"y":240,"wires":[["cb3ebb2cf607bc6e"]]},{"id":"4a8faf0286528557","type":"api-request","z":"6ae4f887e84999f1","name":"","data":"{\n    \"cmd\": \"io.read\",\n    \"id\": 0,\n    \"data\": [\"DSin\", \"SInt\"]\n}","x":310,"y":240,"wires":[["9c75c542f1c48c46"]]},{"id":"cb3ebb2cf607bc6e","type":"debug","z":"6ae4f887e84999f1","name":"debug 11","active":true,"tosidebar":true,"console":false,"tostatus":false,"complete":"true","targetType":"full","statusVal":"","statusType":"auto","x":730,"y":240,"wires":[]},{"id":"943c85ce0ced76f1","type":"inject","z":"6ae4f887e84999f1","name":"","props":[{"p":"payload"},{"p":"topic","vt":"str"}],"repeat":"","crontab":"","once":false,"onceDelay":0.1,"topic":"","payload":"","payloadType":"date","x":140,"y":240,"wires":[["4a8faf0286528557"]]}]
+```
 
 ## Contributing
 
