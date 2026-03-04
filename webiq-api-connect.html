@@ -1,14 +1,14 @@
 <script type="text/javascript">
     RED.nodes.registerType('webiq-api-connect', {
-        category: 'WebIQ',
+        category: 'webiq',
         color: '#C0DEED',
         defaults: {
-            name: {value: ""},
-            host: {value: ""},
-            port: {value: ""},
-            project: {value: ""},
-            username: {value: ""},
-            password: {value: ""}
+            name: { value: "" },
+            host: { value: "" },
+            port: { value: "" },
+            project: { value: "" },
+            username: { value: "" },
+            password: { value: "" }
         },
         inputs: 1,
         outputs: 1,
@@ -30,7 +30,7 @@
     </div>
     <div class="form-row">
         <label for="node-input-port"><i class="fa fa-list-ol"></i> Port</label>
-        <input type="text" id="node-input-port" placeholder="Port">
+        <input type="number" id="node-input-port" placeholder="Port">
     </div>
     <div class="form-row">
         <label for="node-input-project"><i class="fa fa-folder"></i> Project</label>
@@ -47,5 +47,6 @@
 </script>
 
 <script type="text/html" data-help-name="webiq-api-connect">
-    <p>This node connects to a WebIQ server and processes messages.</p>
+    <p>This node connects to a WebIQ server and manages a shared WebSocket connection.</p>
+    <p>API requests should be sent using the <b>API Request</b> nodes linked to this config node.</p>
 </script>

@@ -1,9 +1,11 @@
-module.exports = function(RED) {
+module.exports = function (RED) {
     const WebSocket = require('ws');
 
     function WebIQNode(config) {
         RED.nodes.createNode(this, config);
-        var node = this;
+        const node = this;
+
+        node.log("WEBIQ API CONNECT loaded (LOCAL DEV)");
 
         const host = config.host;
         const port = config.port;
@@ -12,66 +14,181 @@ module.exports = function(RED) {
         const password = config.password;
         const url = `ws://${host}:${port}/${project}/`;
 
-        const ws = new WebSocket(url, 'smarthmi-connect');
+        function isValidHost(host) {
+            if (!host || host.trim() === "") return false;
+            if (host === "localhost") return true;
+            const ipv4Regex = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+            return ipv4Regex.test(host);
+        }
 
-        ws.on('open', function open() {
-            node.status({ fill: 'green', shape: 'dot', text: 'connected' });
-            console.log('Connected to WebIQ server');
+        if (!isValidHost(host)) {
+            node.status({ fill: 'red', shape: 'ring', text: 'invalid host' });
+            node.error(`Host "${host}" is not a valid IPv4 or localhost.`);
+            return;
+        }
 
-            // Log in upon connection
-            const loginPayload = JSON.stringify({
-                cmd: "user.login",
-                id: 0,
-                data: {
-                    username: username,
-                    password: password,
-                    realm: null
+        if (!project || project.trim() === "") {
+            node.status({ fill: 'red', shape: 'ring', text: 'project missing' });
+            node.error("WebIQ project name is empty or missing!");
+            return;
+        }
+
+        let ws = null;
+        let reconnectTimer = null;
+        let reconnectDelay = 1000;
+        const maxReconnectDelay = 30000;
+        let closing = false;
+        let authenticated = false;
+
+        let loginRetryTimer = null;
+        const loginRetryDelay = 5000;
+        let loginAttempted = false;
+        let loginTimeout = null;
+
+        function connect() {
+            if (closing) return;
+
+            authenticated = false;
+            loginAttempted = false;
+            node.status({ fill: 'red', shape: 'ring', text: 'disconnected' });
+
+            ws = new WebSocket(url, 'smarthmi-connect');
+
+            ws.on('open', function () {
+                reconnectDelay = 1000;
+                node.status({ fill: 'yellow', shape: 'ring', text: 'connected - login pending' });
+                attemptLogin();
+            });
+
+            ws.on('message', function (data) {
+                try {
+                    const parsedMessage = JSON.parse(data.toString());
+
+                    if (parsedMessage.cmd === "user.login") {
+                        loginAttempted = true;
+
+                        if (loginTimeout) {
+                            clearTimeout(loginTimeout);
+                            loginTimeout = null;
+                        }
+
+                        if (!parsedMessage.error) {
+                            authenticated = true;
+                            node.status({ fill: 'green', shape: 'dot', text: 'authenticated' });
+                            if (loginRetryTimer) {
+                                clearTimeout(loginRetryTimer);
+                                loginRetryTimer = null;
+                            }
+                        } else {
+                            authenticated = false;
+                            if (parsedMessage.error.code === 404) {
+                                node.status({ fill: 'red', shape: 'ring', text: 'project not found' });
+                                node.error("WebIQ project name invalid: " + parsedMessage.error.message);
+                                return;
+                            } else {
+                                node.status({ fill: 'yellow', shape: 'ring', text: 'connected - login failed' });
+                                node.warn('WebIQ login failed, retrying in 5s...');
+                                if (loginRetryTimer) clearTimeout(loginRetryTimer);
+                                loginRetryTimer = setTimeout(attemptLogin, loginRetryDelay);
+                            }
+                        }
+                    }
+
+                    node.send({ payload: parsedMessage });
+                } catch (e) {
+                    node.send({ payload: data });
                 }
             });
 
-            ws.send(loginPayload);
-        });
+            ws.on('error', function (err) {
+                node.warn(`WebSocket error: ${err.message}`);
+            });
 
-        ws.on('error', function error(err) {
-            node.status({ fill: 'red', shape: 'ring', text: 'disconnected' });
-            console.error('WebSocket error:', err);
-        });
+            ws.on('close', function () {
+                ws = null;
+                authenticated = false;
 
-        ws.on('message', function message(data) {
-            try {
-                const message = data.toString();
-                const parsedMessage = JSON.parse(message);
-                var msg = { payload: parsedMessage };
-                if (parsedMessage.cmd === "user.login" && !parsedMessage.error) {
-                    node.status({ fill: 'green', shape: 'dot', text: 'authenticated' });
+                if (loginTimeout) {
+                    clearTimeout(loginTimeout);
+                    loginTimeout = null;
                 }
-                node.send(msg);
-            } catch (e) {
-                var msg = { payload: data };
-                node.send(msg);
+
+                if (closing) return;
+
+                if (!loginAttempted) {
+                    node.status({ fill: 'red', shape: 'ring', text: 'project not found / connection failed' });
+                    node.error('WebIQ project may be invalid or server unreachable.');
+                } else {
+                    node.status({ fill: 'red', shape: 'ring', text: 'disconnected' });
+                }
+
+                scheduleReconnect();
+            });
+        }
+
+        function attemptLogin() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                loginAttempted = true;
+
+                ws.send(JSON.stringify({
+                    cmd: "user.login",
+                    id: 0,
+                    data: { username, password, realm: null }
+                }));
+
+                if (loginTimeout) clearTimeout(loginTimeout);
+                loginTimeout = setTimeout(() => {
+                    if (!authenticated) {
+                        node.status({ fill: 'red', shape: 'ring', text: 'login timeout / project not found' });
+                        node.error('No login reply received: project may be invalid or server unreachable.');
+                        try { ws.close(); } catch (_) {}
+                    }
+                }, 5000);
             }
-        });
+        }
 
-        ws.on('close', function close() {
-            node.status({ fill: 'red', shape: 'ring', text: 'disconnected' });
-            console.log('Disconnected from WebIQ server');
-        });
+        function scheduleReconnect() {
+            if (reconnectTimer || closing) return;
 
-        node.on('input', function(msg) {
-            if (ws.readyState === WebSocket.OPEN) {
-                if (msg.payload && msg.payload.cmd && msg.payload.id !== undefined && msg.payload.data !== undefined) {
+            reconnectTimer = setTimeout(() => {
+                reconnectTimer = null;
+                reconnectDelay = Math.min(reconnectDelay * 2, maxReconnectDelay);
+                connect();
+            }, reconnectDelay);
+        }
+
+        node.on('input', function (msg) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                if (!authenticated) {
+                    node.error('Cannot send: not authenticated yet');
+                    return;
+                }
+
+                if (
+                    msg.payload &&
+                    msg.payload.cmd &&
+                    msg.payload.id !== undefined &&
+                    msg.payload.data !== undefined
+                ) {
                     ws.send(JSON.stringify(msg.payload));
                 } else {
                     node.error('Payload is missing required fields: cmd, id, data');
                 }
             } else {
-                node.error('WebSocket is not open');
+                node.error('WebSocket is not connected');
             }
         });
 
-        node.on('close', function() {
-            ws.close();
+        node.on('close', function () {
+            closing = true;
+            if (reconnectTimer) clearTimeout(reconnectTimer);
+            if (loginRetryTimer) clearTimeout(loginRetryTimer);
+            if (loginTimeout) clearTimeout(loginTimeout);
+            if (ws) try { ws.close(); } catch (_) {}
+            authenticated = false;
         });
+
+        connect();
     }
 
     RED.nodes.registerType("webiq-api-connect", WebIQNode);

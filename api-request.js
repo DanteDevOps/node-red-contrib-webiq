@@ -1,34 +1,21 @@
-module.exports = function(RED) {
-    function InjectCmdIdDataNode(config) {
+module.exports = function (RED) {
+    function ApiRequestNode(config) {
         RED.nodes.createNode(this, config);
-        var node = this;
+        const node = this;
 
-        function sendPayload() {
+        node.on('input', function(msg) {
+            let payload = {};
             try {
-                let data = JSON.parse(config.data);
-                var msg = {
-                    payload: {
-                        cmd: config.cmd,
-                        id: parseInt(config.id, 10),
-                        data: data
-                    }
-                };
-                node.send(msg);
-            } catch (error) {
-                node.error("Invalid JSON in data field", error);
+                payload = JSON.parse(config.data || "{}");
+            } catch (err) {
+                node.warn("Invalid JSON in Data field, sending empty object");
             }
-        }
-
-        node.on('input', function() {
-            sendPayload();
+            msg.payload = payload;
+            node.send(msg);
         });
 
-        if (config.interval > 0) {
-            setInterval(() => {
-                sendPayload();
-            }, config.interval);
-        }
+        node.status({ fill: "blue", shape: "dot", text: "ready" });
     }
 
-    RED.nodes.registerType("api-request", InjectCmdIdDataNode);
+    RED.nodes.registerType("api-request", ApiRequestNode);
 };
