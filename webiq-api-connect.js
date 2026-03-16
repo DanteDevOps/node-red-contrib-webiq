@@ -15,15 +15,12 @@ module.exports = function (RED) {
         const url = `ws://${host}:${port}/${project}/`;
 
         function isValidHost(host) {
-            if (!host || host.trim() === "") return false;
-            if (host === "localhost") return true;
-            const ipv4Regex = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
-            return ipv4Regex.test(host);
+            return host && host.trim() !== "";
         }
 
         if (!isValidHost(host)) {
-            node.status({ fill: 'red', shape: 'ring', text: 'invalid host' });
-            node.error(`Host "${host}" is not a valid IPv4 or localhost.`);
+            node.status({ fill: 'red', shape: 'ring', text: 'host missing' });
+            node.error('Host is empty or missing.');
             return;
         }
 
