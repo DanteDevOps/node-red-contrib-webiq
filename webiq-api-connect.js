@@ -16,9 +16,13 @@ module.exports = function (RED) {
 
         function isValidHost(host) {
             if (!host || host.trim() === "") return false;
-            if (host === "localhost") return true;
-            const ipv4Regex = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
-            return ipv4Regex.test(host);
+            try {
+                // Use native URL parser to ensure the format is valid (catches spaces, illegal chars, etc)
+                new URL(`ws://${host}`);
+                return true;
+            } catch (err) {
+                return false;
+            }
         }
 
         if (!isValidHost(host)) {
@@ -52,7 +56,13 @@ module.exports = function (RED) {
             loginAttempted = false;
             node.status({ fill: 'red', shape: 'ring', text: 'disconnected' });
 
-            ws = new WebSocket(url, 'smarthmi-connect');
+            try {
+                ws = new WebSocket(url, 'smarthmi-connect');
+            } catch (err) {
+                node.status({ fill: 'red', shape: 'ring', text: 'invalid host string' });
+                node.error(`Could not create WebSocket connection: ${err.message}`);
+                return;
+            }
 
             ws.on('open', function () {
                 reconnectDelay = 1000;
