@@ -15,7 +15,14 @@ module.exports = function (RED) {
         const url = `ws://${host}:${port}/${project}/`;
 
         function isValidHost(host) {
-            return host && host.trim() !== "";
+            if (!host || host.trim() === "") return false;
+            try {
+                // Use native URL parser to ensure the format is valid (catches spaces, illegal chars, etc)
+                new URL(`ws://${host}`);
+                return true;
+            } catch (err) {
+                return false;
+            }
         }
 
         if (!isValidHost(host)) {
@@ -49,7 +56,13 @@ module.exports = function (RED) {
             loginAttempted = false;
             node.status({ fill: 'red', shape: 'ring', text: 'disconnected' });
 
-            ws = new WebSocket(url, 'smarthmi-connect');
+            try {
+                ws = new WebSocket(url, 'smarthmi-connect');
+            } catch (err) {
+                node.status({ fill: 'red', shape: 'ring', text: 'invalid host string' });
+                node.error(`Could not create WebSocket connection: ${err.message}`);
+                return;
+            }
 
             ws.on('open', function () {
                 reconnectDelay = 1000;

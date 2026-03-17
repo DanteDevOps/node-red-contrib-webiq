@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Fixed — WebIQ API Connect Node
+- **DNS hostname support**: The host validation check previously only accepted IPv4 addresses and `localhost`, silently rejecting valid DNS hostnames (e.g. `myserver.local`, `webiq.company.com`). The check has been simplified so that any non-empty host value is accepted, allowing DNS names to be used alongside IP addresses.
+
+---
+
 ## [1.1.1] - 2026-03-04
 
 ### Added — WebIQ API Connect Node
@@ -20,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `project not found / connection failed` — Connection closed before a login was attempted; server may be unreachable.
   - `authenticated` — Successfully logged in and ready to send commands.
 - **Login timeout guard**: If no login response is received within 5 seconds of connecting, the node reports a clear error and closes the socket to trigger a clean reconnect cycle.
-- **Invalid host detection**: Node now validates the host field on startup and reports `invalid host` immediately if the value is not a valid IPv4 address or `localhost`, instead of failing silently.
+- **Invalid host detection**: Node now validates the host field on startup and reports `invalid host` immediately if the host field is empty, instead of failing silently. *(Note: initial implementation restricted to IPv4/localhost only — expanded in next release to support DNS hostnames.)*
 - **Missing project guard**: Node now reports `project missing` immediately on deploy if the project UUID field is empty.
 
 ### Changed — WebIQ API Connect Node
