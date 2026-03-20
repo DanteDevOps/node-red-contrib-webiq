@@ -7,10 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [1.1.4] - 2026-03-20
 
 ### Fixed — WebIQ API Connect Node
-- **DNS hostname support**: The host validation check previously only accepted IPv4 addresses and `localhost`, silently rejecting valid DNS hostnames (e.g. `myserver.local`, `webiq.company.com`). The check has been simplified so that any non-empty host value is accepted, allowing DNS names to be used alongside IP addresses.
+- **Docker container names / IDs now accepted as host**: The host validation was rejecting valid Docker container names (e.g. `webiq_server`), container IDs (e.g. `e8b193a88e3e`), and DNS hostnames on Node.js 18–20 because the WHATWG `URL` parser treats underscores and short hex IDs as invalid hostnames. Validation has been simplified to a non-empty check; truly malformed hosts are still caught at WebSocket creation time.
 
 ---
 

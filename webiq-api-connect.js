@@ -15,14 +15,7 @@ module.exports = function (RED) {
         const url = `ws://${host}:${port}/${project}/`;
 
         function isValidHost(host) {
-            if (!host || host.trim() === "") return false;
-            try {
-                // Use native URL parser to ensure the format is valid (catches spaces, illegal chars, etc)
-                new URL(`ws://${host}`);
-                return true;
-            } catch (err) {
-                return false;
-            }
+            return !!(host && host.trim());
         }
 
         if (!isValidHost(host)) {
