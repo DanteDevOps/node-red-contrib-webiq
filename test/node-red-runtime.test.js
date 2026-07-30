@@ -38,10 +38,19 @@ if (!runtimeDirectory) {
                 serverRequests.push(request);
 
                 if (request.cmd === 'user.login') {
+                    // Authenticate only the exact credentials supplied through
+                    // Node-RED's credential map. Accepting any login would let this
+                    // test pass even if node.credentials stopped reaching the
+                    // runtime - which is the single thing it exists to prove.
+                    const ok = request.data &&
+                        request.data.username === 'test-user' &&
+                        request.data.password === 'test-password';
+
                     socket.send(JSON.stringify({
                         cmd: request.cmd,
                         id: request.id,
-                        data: { loggedIn: true }
+                        data: ok ? { loggedIn: true } : undefined,
+                        error: ok ? undefined : { code: 401, message: 'bad credentials' }
                     }));
                     return;
                 }
@@ -118,10 +127,14 @@ if (!runtimeDirectory) {
         const outputs = [];
         outputNode.on('input', (msg) => outputs.push(msg));
 
-        await waitFor(
-            () => serverRequests.some((request) => request.cmd === 'user.login'),
+        const login = await waitFor(
+            () => serverRequests.find((request) => request.cmd === 'user.login'),
             'Node-RED login request'
         );
+
+        // The credentials must arrive from the credential store, not the flow.
+        assert.equal(login.data.username, 'test-user');
+        assert.equal(login.data.password, 'test-password');
 
         requestNode.receive({ topic: 'preserved-by-api-request' });
 

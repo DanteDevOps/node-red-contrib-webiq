@@ -25,10 +25,12 @@ module.exports = function (RED) {
     // would otherwise sit on ws's own 30s close timer and blow through it.
     const CLOSE_GRACE_MS = 2000;
 
-    // HTTP statuses on the upgrade that mean the endpoint itself is wrong. Anything
-    // else - notably 429 and 5xx - is a busy or broken server and is retried on the
-    // normal ladder.
-    const PERMANENT_UPGRADE_CODES = [400, 401, 403, 404, 410, 501];
+    // HTTP statuses on the upgrade that mean the endpoint itself is wrong: retrying
+    // fast cannot help, because nothing will change without a configuration edit.
+    // Every 5xx is excluded on purpose - including 501, which is a statement about
+    // the server rather than about this configuration - so any server-side failure
+    // is retried on the normal ladder.
+    const PERMANENT_UPGRADE_CODES = [400, 401, 403, 404, 410];
 
     function WebIQNode(config) {
         RED.nodes.createNode(this, config);
@@ -125,10 +127,26 @@ module.exports = function (RED) {
                 };
             }
 
-            if (hasLegacyCredentials && !username && !password) {
+            // A resolved node of the wrong type would connect over wss() while
+            // silently discarding the CA or client certificate that was the whole
+            // point of selecting it.
+            if (tlsRequested && typeof tlsConfigNode.addTLSOptions !== 'function') {
                 return {
-                    error: 'WebIQ credentials must be re-entered after upgrading to 2.0. Open this node, type the username and password again, and redeploy - they are now held in Node-RED\'s credential store instead of the flow file.',
-                    status: 'credentials need re-entry'
+                    error: 'The selected TLS configuration is not a tls-config node, so its certificate settings cannot be applied. Refusing to connect rather than ignoring them.',
+                    status: 'TLS config invalid'
+                };
+            }
+
+            // Check the credential pair itself, never the presence of the legacy
+            // fields. Gating on those would protect only until the first full deploy
+            // strips them, after which a credential-less node would happily open a
+            // socket and send a login carrying no username or password at all.
+            if (!username || !password) {
+                return {
+                    error: hasLegacyCredentials
+                        ? 'WebIQ credentials must be re-entered after upgrading to 2.0. Open this node, type the username and password again, and redeploy - they are now held in Node-RED\'s credential store instead of the flow file.'
+                        : 'WebIQ username and password are not set. Open this node and enter them; they are stored in Node-RED\'s credential store.',
+                    status: hasLegacyCredentials ? 'credentials need re-entry' : 'credentials missing'
                 };
             }
 
@@ -183,7 +201,6 @@ module.exports = function (RED) {
         let reconnectTimer = null;
         let reconnectDelay = 1000;
         let closing = false;
-        let sendDegraded = false;
 
         const initialReconnectDelay = 1000;
         const maxReconnectDelay = 30000;
@@ -222,6 +239,7 @@ module.exports = function (RED) {
                 authenticatedAt: null,
                 failureKind: null,
                 upgradePermanent: false,
+                sendDegraded: false,
                 loginAttempted: false,
                 authFailures: 0,
                 missedHeartbeats: 0,
@@ -344,7 +362,6 @@ module.exports = function (RED) {
 
             const ctx = createContext(socket);
             activeContext = ctx;
-            sendDegraded = false;
             setState(ctx, STATE.CONNECTING, { fill: 'red', shape: 'ring', text: 'disconnected' });
 
             ctx.handlers.open = function () {
@@ -630,7 +647,7 @@ module.exports = function (RED) {
             // single large request sail past the check it is meant to be caught by.
             const frameBytes = Buffer.byteLength(serialized);
             if (socket.bufferedAmount + frameBytes > maxBufferedBytes) {
-                sendDegraded = true;
+                ctx.sendDegraded = true;
                 node.status({ fill: 'yellow', shape: 'ring', text: 'send buffer full' });
                 done(new Error(`WebIQ send buffer is backed up (${socket.bufferedAmount} bytes queued, this request adds ${frameBytes}); dropping this request.`));
                 return;
@@ -642,8 +659,11 @@ module.exports = function (RED) {
                     return;
                 }
                 // Recovered: a send got through, so stop showing the warning badge.
-                if (sendDegraded) {
-                    sendDegraded = false;
+                // Only the socket that raised the warning may clear it: a delayed
+                // callback from a superseded socket must not paint over the state of
+                // the connection that replaced it.
+                if (owns(ctx) && ctx.sendDegraded) {
+                    ctx.sendDegraded = false;
                     if (isAuthenticated()) {
                         node.status({ fill: 'green', shape: 'dot', text: 'authenticated' });
                     }

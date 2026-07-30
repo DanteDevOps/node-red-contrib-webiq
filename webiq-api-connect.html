@@ -153,8 +153,9 @@
         <dt>Password <span class="property-type">credential</span></dt>
         <dd>WebIQ project password. Stored alongside the username in the credential
             store. Nodes created before 2.0 kept these two fields in the flow file in
-            cleartext; such a node still works, but warns on deploy until you reopen
-            it, re-enter both values and redeploy.</dd>
+            cleartext. There is deliberately no fallback to those old values: such a
+            node reports <code>credentials need re-entry</code> and does not connect
+            until you reopen it, type both values in again and redeploy.</dd>
 
         <dt>Login timeout <span class="property-type">number</span></dt>
         <dd>How many seconds to wait for the server's login reply before reporting

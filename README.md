@@ -127,7 +127,9 @@ The node's status badge names the problem. The most common ones:
 | Status / message | What it means | What to do |
 | --- | --- | --- |
 | `credentials need re-entry` | A 1.x node still has its credentials in the flow file. | Open the node, type the username and password in again, redeploy. See *Upgrading from 1.x*. |
+| `credentials missing` | No username/password have been entered. | Open the node and enter them. The node will not send a login without credentials. |
 | `TLS config unresolved` | A TLS configuration is selected but the config node is missing. | The node refuses to connect rather than silently falling back to unencrypted — re-select or recreate the `tls-config` node. |
+| `TLS config invalid` | The selected configuration is not a `tls-config` node. | Its certificate settings could not be applied, so the node refuses rather than connecting without them. Re-select a real `tls-config` node. |
 | `host missing` | The Host field is empty. | Fill it in. |
 | `invalid port` | Port is not an integer in 1–65535. | In 1.x an empty port silently dialled port 80 and reported it as a project failure. Set the real port, usually `10123`. |
 | `project missing` / `invalid project` | Project is empty, or contains `/`, `?`, `#` or `\`. | Use the project name or UUID only, not a URL or path. |
@@ -135,8 +137,8 @@ The node's status badge names the problem. The most common ones:
 | `login timeout / project not found` | No login reply within the timeout. | Raise **Login timeout**; if it persists, check the project name and that the project is actually running. |
 | `connected - login failed` | The server rejected the credentials. | Check username and password. Retries back off to 60 s, so you will not lock the account out — but nothing will work until they are right. |
 | `project not found` | The server replied with a 404. | The project name or UUID is wrong, or the project is not loaded yet. Retries every 30 s. |
-| `server rejected upgrade (HTTP 404)` | The server never accepted the WebSocket at all. | Different from the above: check host, port and any reverse proxy in front of WebIQ. Applies to 400/401/403/404/410/501, which are retried slowly. |
-| `server unavailable (HTTP 503)` | The server or proxy is busy or broken, not misconfigured. | Transient — 429 and 5xx are retried on the normal fast ladder. No action usually needed. |
+| `server rejected upgrade (HTTP nnn)` | The server never accepted the WebSocket at all. | Different from the above: check host, port and any reverse proxy in front of WebIQ. Shown for **400, 401, 403, 404, 410** — these cannot fix themselves, so they retry every 30 s. |
+| `server unavailable (HTTP nnn)` | The server or proxy is busy or broken, not misconfigured. | Everything else, including **429 and every 5xx**, retries on the normal fast ladder. Usually no action needed. |
 | `project not found / connection failed` | The socket closed before a login was attempted. | Server unreachable, wrong port, or a firewall in the way. |
 | `link stale - reconnecting` | Two heartbeats passed with no traffic and no pong. | Normal after a network drop — it reconnects automatically. Persistent flapping means the server does not answer pings; consider raising **Heartbeat** or setting it to `0`. |
 | `send buffer full` | The server has stopped reading and 1 MB is queued. | Requests are being dropped rather than buffered forever. Check server load. |

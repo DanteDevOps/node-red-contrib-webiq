@@ -13,6 +13,11 @@ node_modules/
 # Tests - not needed by consumers
 test/
 
+# Packed tarballs. .gitignore covers these for git, but npm ignores .gitignore
+# whenever an .npmignore exists - without this line a previous pack ends up
+# nested inside the next one.
+*.tgz
+
 # Repo tooling
 .gitattributes
 .npmignore

@@ -94,6 +94,98 @@ test('a 1.x node whose credentials were never migrated fails with an actionable 
     assert.ok(node.errors.some(({ error }) => /re-entered after upgrading/.test(String(error))));
 });
 
+test('a node with no credentials at all never sends an empty login', async (t) => {
+    const server = await createWebIQServer(loginResponder);
+    t.after(() => server.close());
+
+    const runtime = createRuntime(registerWebIQConnect);
+    // The state a 1.x node reaches once a full deploy has stripped the legacy
+    // username/password: nothing in the credential store, nothing in the flow.
+    const node = runtime.create('webiq-api-connect', {
+        host: '127.0.0.1',
+        port: String(server.port),
+        project: 'p',
+        loginTimeout: 5,
+        heartbeat: 0
+    });
+    t.after(() => stopConnectionNode(node));
+
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    assert.equal(server.requests.length, 0, 'must not send a login with no credentials');
+    assert.equal(node.statuses.some((s) => s.text === 'authenticated'), false);
+    assert.ok(node.statuses.some((s) => s.text === 'credentials missing'));
+});
+
+test('a TLS reference resolving to the wrong node type refuses to connect', async (t) => {
+    const server = await createWebIQServer(loginResponder);
+    t.after(() => server.close());
+
+    const runtime = createRuntime((RED) => {
+        // Resolves, but is not a tls-config node - its certificate settings could
+        // not be applied, so connecting would silently discard them.
+        RED.nodes.getNode = () => ({ id: 'something-else' });
+        registerWebIQConnect(RED);
+    });
+
+    const node = runtime.create('webiq-api-connect', {
+        host: '127.0.0.1',
+        port: String(server.port),
+        project: 'p',
+        loginTimeout: 5,
+        heartbeat: 0,
+        tls: 'wrong-type',
+        credentials: { username: 'u', password: 'p' }
+    });
+    t.after(() => stopConnectionNode(node));
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    assert.equal(server.requests.length, 0);
+    assert.ok(node.statuses.some((s) => s.text === 'TLS config invalid'));
+});
+
+test('5xx upgrade failures are all transient, including 501', async (t) => {
+    const http = require('node:http');
+    const results = {};
+
+    for (const code of [401, 404, 429, 500, 501, 503]) {
+        const httpServer = http.createServer((req, res) => { res.writeHead(code); res.end(); });
+        httpServer.listen(0);
+        await require('node:events').once(httpServer, 'listening');
+
+        const runtime = createRuntime(registerWebIQConnect);
+        const node = runtime.create('webiq-api-connect', {
+            host: '127.0.0.1',
+            port: String(httpServer.address().port),
+            project: 'p',
+            loginTimeout: 5,
+            heartbeat: 0,
+            credentials: { username: 'u', password: 'p' }
+        });
+
+        await waitFor(
+            () => node.statuses.find((s) => /rejected upgrade|server unavailable/.test(s.text)),
+            `status for HTTP ${code}`
+        );
+        results[code] = node.statuses.some((s) => /rejected upgrade/.test(s.text))
+            ? 'permanent'
+            : 'transient';
+
+        node.emit('close');
+        await new Promise((resolve) => httpServer.close(resolve));
+    }
+
+    assert.deepEqual(results, {
+        401: 'permanent',
+        404: 'permanent',
+        429: 'transient',
+        500: 'transient',
+        501: 'transient',
+        503: 'transient'
+    });
+});
+
 test('inbound ping frames count as liveness', async (t) => {
     const server = await createWebIQServer(loginResponder);
     t.after(() => server.close());
