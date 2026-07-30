@@ -1,0 +1,94 @@
+[
+    {
+        "id": "7f3a1c9e2b4d5068",
+        "type": "tab",
+        "label": "WebIQ - simple read",
+        "disabled": false,
+        "info": ""
+    },
+    {
+        "id": "a4e8b1d7c0592f36",
+        "type": "comment",
+        "z": "7f3a1c9e2b4d5068",
+        "name": "Read me before deploying",
+        "info": "This example reads two tags from a WebIQ project.\n\nThe **WebIQ server** node is shipped **disabled** so that importing this\nflow cannot start connecting to anything by accident.\n\nTo run it:\n\n1. Open the **WebIQ server** node and fill in Host, Port, Project,\n   Username and Password for your own WebIQ runtime.\n2. Enable the node (right-click the node and choose Enable).\n3. Deploy, then press the inject button.\n\nThe node's status shows the connection state. `authenticated` (green)\nmeans it is ready to send commands. If it stays on\n`login timeout / project not found`, raise the **Login timeout** field;\nprojects backed by a slow PLC can need considerably longer than the\ndefault 5 seconds to answer a login.\n\nThe **API Request** node holds the full JSON payload sent to the server.\nEdit the `data` array to name the tags you want to read.",
+        "x": 190,
+        "y": 100,
+        "wires": []
+    },
+    {
+        "id": "c6d2f80a3e174b95",
+        "type": "inject",
+        "z": "7f3a1c9e2b4d5068",
+        "name": "Trigger a read",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 170,
+        "y": 180,
+        "wires": [
+            [
+                "e0b5947c1a8d2f63"
+            ]
+        ]
+    },
+    {
+        "id": "e0b5947c1a8d2f63",
+        "type": "api-request",
+        "z": "7f3a1c9e2b4d5068",
+        "name": "Read DSin / SInt",
+        "data": "{\n    \"cmd\": \"io.read\",\n    \"id\": 1,\n    \"data\": [\"DSin\", \"SInt\"]\n}",
+        "x": 400,
+        "y": 180,
+        "wires": [
+            [
+                "b8c1e6042f7a935d"
+            ]
+        ]
+    },
+    {
+        "id": "b8c1e6042f7a935d",
+        "type": "webiq-api-connect",
+        "z": "7f3a1c9e2b4d5068",
+        "d": true,
+        "name": "WebIQ server",
+        "host": "127.0.0.1",
+        "port": "10123",
+        "project": "",
+        "loginTimeout": 5,
+        "heartbeat": 30,
+        "x": 630,
+        "y": 180,
+        "wires": [
+            [
+                "d3f7a25b8c604e19"
+            ]
+        ]
+    },
+    {
+        "id": "d3f7a25b8c604e19",
+        "type": "debug",
+        "z": "7f3a1c9e2b4d5068",
+        "name": "WebIQ response",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 860,
+        "y": 180,
+        "wires": []
+    }
+]

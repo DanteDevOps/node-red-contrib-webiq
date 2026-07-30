@@ -7,12 +7,38 @@
             host: { value: "" },
             port: { value: "" },
             project: { value: "" },
-            username: { value: "" },
-            password: { value: "" }
+            loginTimeout: {
+                value: 5,
+                validate: function (v) {
+                    // Must agree with the runtime clamp in webiq-api-connect.js:
+                    // empty falls back to 5s, anything above 86400s is rejected here
+                    // and clamped there.
+                    if (v === "" || v === undefined) { return true; }
+                    var n = Number(v);
+                    return isFinite(n) && n > 0 && n <= 86400;
+                }
+            },
+            heartbeat: {
+                value: 30,
+                validate: function (v) {
+                    // 0 is valid here and means "disabled".
+                    if (v === "" || v === undefined) { return true; }
+                    var n = Number(v);
+                    return isFinite(n) && n >= 0 && n <= 3600;
+                }
+            }
+        },
+        // Stored in Node-RED's credential store, not in flows.json, and stripped
+        // from flow exports. The input ids stay node-input-<name>, which is how
+        // the editor binds credential fields.
+        credentials: {
+            username: { type: "text" },
+            password: { type: "password" }
         },
         inputs: 1,
         outputs: 1,
         icon: "bridge.svg",
+        paletteLabel: "WebIQ connect",
         label: function () {
             return this.name || "WebIQ API Connect";
         }
@@ -44,9 +70,69 @@
         <label for="node-input-password"><i class="fa fa-lock"></i> Password</label>
         <input type="password" id="node-input-password" placeholder="Password">
     </div>
+    <div class="form-row">
+        <label for="node-input-loginTimeout"><i class="fa fa-clock-o"></i> Login timeout</label>
+        <input type="number" id="node-input-loginTimeout" min="0.1" max="86400" placeholder="5" style="width:100px;"> seconds
+    </div>
+    <div class="form-tips">
+        Increase the login timeout if the WebIQ project is backed by a slow PLC and needs
+        longer than the default 5 seconds to answer a login. Leave empty to use the default.
+        Maximum 86400 (24 hours).
+    </div>
+    <div class="form-row">
+        <label for="node-input-heartbeat"><i class="fa fa-heartbeat"></i> Heartbeat</label>
+        <input type="number" id="node-input-heartbeat" min="0" max="3600" placeholder="30" style="width:100px;"> seconds
+    </div>
+    <div class="form-tips">
+        How often to probe the connection once authenticated. Without this, a link that
+        dies without a TCP close - a frozen server, a dropped NAT entry, a switch reboot -
+        is undetectable: the node keeps reporting <b>authenticated</b> while every request
+        disappears. Set <b>0</b> to disable.
+    </div>
 </script>
 
 <script type="text/html" data-help-name="webiq-api-connect">
-    <p>This node connects to a WebIQ server and manages a shared WebSocket connection.</p>
-    <p>API requests should be sent using the <b>API Request</b> nodes linked to this config node.</p>
+    <p>This node connects to a WebIQ server over WebSocket, logs in with the configured
+       credentials, and reconnects automatically if the connection drops.</p>
+    <p>Wire an <b>API Request</b> node into this node's input to send commands. Every message
+       received from the server is emitted on this node's output.</p>
+
+    <h3>Settings</h3>
+    <dl class="message-properties">
+        <dt>Host <span class="property-type">string</span></dt>
+        <dd>WebIQ server hostname, IP address, or Docker container name.</dd>
+
+        <dt>Port <span class="property-type">number</span></dt>
+        <dd>WebIQ server port (for example <code>10123</code>).</dd>
+
+        <dt>Project <span class="property-type">string</span></dt>
+        <dd>WebIQ project name or UUID.</dd>
+
+        <dt>Username <span class="property-type">credential</span></dt>
+        <dd>WebIQ project username. Stored in Node-RED's credential store, not in
+            <code>flows.json</code>, and stripped from flow exports.</dd>
+
+        <dt>Password <span class="property-type">credential</span></dt>
+        <dd>WebIQ project password. Stored alongside the username in the credential
+            store. Nodes created before 2.0 kept these two fields in the flow file in
+            cleartext; such a node still works, but warns on deploy until you reopen
+            it, re-enter both values and redeploy.</dd>
+
+        <dt>Login timeout <span class="property-type">number</span></dt>
+        <dd>How many seconds to wait for the server's login reply before reporting
+            <code>login timeout</code> and reconnecting. Defaults to <code>5</code>,
+            maximum <code>86400</code> (24 hours). Raise this for projects backed by a
+            slow PLC, which may need considerably longer to answer. Values above the
+            maximum are clamped rather than accepted, because the underlying timer
+            overflows past that point and would fire immediately.</dd>
+
+        <dt>Heartbeat <span class="property-type">number</span></dt>
+        <dd>Seconds between liveness probes, sent only once the connection is
+            authenticated. Defaults to <code>30</code>; <code>0</code> disables it.
+            The link is terminated and reconnected after two consecutive intervals with
+            no pong <i>and</i> no other inbound traffic, so a server that is streaming
+            data but ignores pings is never treated as dead. Without a heartbeat, a
+            connection that drops without a TCP close stays <code>authenticated</code>
+            indefinitely and never reconnects.</dd>
+    </dl>
 </script>

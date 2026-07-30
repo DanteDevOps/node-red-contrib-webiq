@@ -1,0 +1,10 @@
+# Normalise line endings: LF in the repository, native in the working tree.
+# The repository previously held a mix of CRLF and LF blobs, which made
+# `git diff --check` report phantom trailing whitespace on every edited line.
+* text=auto eol=lf
+
+# Never touch binaries
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary

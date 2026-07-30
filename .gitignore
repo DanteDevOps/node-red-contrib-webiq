@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+
+# IDE files
+.idea/
+.vscode/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# npm pack output
+*.tgz

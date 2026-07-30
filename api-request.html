@@ -4,7 +4,7 @@ RED.nodes.registerType('api-request', {
     color: '#C0DEED',
     defaults: {
         name: { value: "" },
-        data: { 
+        data: {
             value: `{
     "cmd": "io.read",
     "id": 0,
@@ -15,24 +15,27 @@ RED.nodes.registerType('api-request', {
     inputs: 1,
     outputs: 1,
     icon: "envelope.svg",
+    paletteLabel: "WebIQ request",
     label: function() { return this.name || "API Request"; }
 });
 </script>
 
 <script type="text/html" data-template-name="api-request">
 <div class="form-row">
-    <label>Name</label>
+    <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
     <input type="text" id="node-input-name" placeholder="Name">
 </div>
 <div class="form-row">
-    <label>Data (full JSON payload)</label>
-    <textarea id="node-input-data" style="width:100%; height:120px;">
-{
-    "cmd": "io.read",
-    "id": 0,
-    "data": ["DSin", "SInt"]
-}
-    </textarea>
+    <label for="node-input-data"><i class="fa fa-code"></i> Data</label>
+    <!-- Left empty on purpose: the editor fills this from defaults.data above.
+         Inlining a second copy of the JSON here only creates two versions that
+         drift apart. -->
+    <textarea id="node-input-data" style="width:100%; height:120px;"></textarea>
+</div>
+<div class="form-tips">
+    The full JSON payload sent to the WebIQ server. It must contain
+    <code>cmd</code>, <code>id</code> and <code>data</code>, or the connection node
+    will reject it.
 </div>
 </script>
 

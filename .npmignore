@@ -9,3 +9,10 @@ node_modules/
 
 # Logs
 *.log
+
+# Tests - not needed by consumers
+test/
+
+# Repo tooling
+.gitattributes
+.npmignore

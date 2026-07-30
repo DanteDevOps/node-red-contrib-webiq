@@ -27,6 +27,7 @@ npm install node-red-contrib-webiq
    - **Project**: The WebIQ project name.
    - **Username**: Your WebIQ project username.
    - **Password**: Your WebIQ project password.
+   - **Login timeout**: Seconds to wait for the server's login reply before reporting a timeout and reconnecting. Defaults to `5`. Raise this if the project is backed by a slow PLC — a login that takes longer than the timeout will otherwise loop without ever authenticating.
 3. Deploy the changes.
 
 ### API Request Node
