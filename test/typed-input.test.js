@@ -109,3 +109,37 @@ test('the static template is cloned so downstream mutation cannot corrupt it', a
 
     assert.deepEqual(node.sent[1].payload.data, ['A'], 'second message must be unaffected');
 });
+
+test('flow and global context sources are evaluated per message', async () => {
+    for (const scope of ['flow', 'global']) {
+        const runtime = createRuntime(registerApiRequest);
+        const node = runtime.create('api-request', {
+            data: 'webiqRequest',
+            dataType: scope
+        });
+
+        // The harness mock reads these off the node, mirroring a context store.
+        const store = { webiqRequest: { cmd: 'io.read', id: 3, data: ['Tag'] } };
+        if (scope === 'flow') { node._flowContext = store; } else { node._globalContext = store; }
+
+        const err = await drive(node, {});
+
+        assert.equal(err, undefined, `${scope} source should evaluate cleanly`);
+        assert.deepEqual(node.sent[0].payload, { cmd: 'io.read', id: 3, data: ['Tag'] });
+    }
+});
+
+test('a context source with nothing stored fails without emitting', async () => {
+    const runtime = createRuntime(registerApiRequest);
+    const node = runtime.create('api-request', {
+        data: 'missingKey',
+        dataType: 'flow'
+    });
+    node._flowContext = {};
+
+    const err = await drive(node, {});
+
+    assert.ok(err instanceof Error);
+    assert.match(String(err), /not a request object/);
+    assert.equal(node.sent.length, 0);
+});

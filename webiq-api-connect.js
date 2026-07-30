@@ -137,6 +137,18 @@ module.exports = function (RED) {
                 };
             }
 
+            // A tls-config node that failed to load its files sets valid = false, and
+            // its addTLSOptions then silently omits every certificate, key, CA and
+            // PFX it was configured with - the method is still present, so checking
+            // for the method alone is not enough. Compared against false explicitly
+            // so a provider that does not expose the flag at all still works.
+            if (tlsRequested && tlsConfigNode.valid === false) {
+                return {
+                    error: 'The selected TLS configuration failed to load its certificate material (check the file paths on the tls-config node). Refusing to connect, because the connection would otherwise proceed without the certificates you selected.',
+                    status: 'TLS config invalid'
+                };
+            }
+
             // Check the credential pair itself, never the presence of the legacy
             // fields. Gating on those would protect only until the first full deploy
             // strips them, after which a credential-less node would happily open a
@@ -576,7 +588,12 @@ module.exports = function (RED) {
         // +/-20% jitter, so a site with many gateways does not stampede a WebIQ
         // server the instant it comes back up.
         function withJitter(delay) {
-            return Math.round(delay * (0.8 + (Math.random() * 0.4)));
+            // Clamped after jittering, so the documented 30s ceiling is a real
+            // ceiling rather than 30s +20%.
+            return Math.min(
+                Math.round(delay * (0.8 + (Math.random() * 0.4))),
+                maxReconnectDelay
+            );
         }
 
         function scheduleReconnect(overrideDelayMs) {
