@@ -41,6 +41,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **HTTP upgrade rejections are distinguished from WebIQ JSON errors.** A non-101 response to the upgrade means the server never accepted the WebSocket at all, and now reports as `server rejected upgrade (HTTP nnn)` rather than being conflated with an application-level error carrying the same code.
 - **Redeploy now waits for the socket to close.** `node.on('close')` took no arguments, so Node-RED did not await teardown and started the replacement node while the old socket was still open. It now takes `(removed, done)`, detaches its own listeners by name rather than calling `removeAllListeners()`, and falls back to `terminate()` after 2 seconds so a frozen peer cannot exceed Node-RED's shutdown limit.
 
+### Fixed — configuration and endpoint handling
+- **An invalid configuration used to black-hole every message.** The constructor returned before registering an input listener, so a node with a bad host or empty project consumed messages and produced no output, no error, no Catch event and no `done()` — the message simply vanished. Handlers are now registered unconditionally and a misconfigured node fails each message through `done(err)`; only the connection itself is skipped.
+- **Endpoint validation added.** The port is checked as an integer in 1–65535 (previously an empty port silently dialled port 80 and blamed the project field); the project is rejected if it contains a path separator, `?`, `#` or `\`, and is URL-encoded rather than interpolated raw; a bare IPv6 literal is bracketed so the authority is unambiguous.
+- **An empty Heartbeat field no longer disables the heartbeat.** `Number('')` is `0`, which the validity check treated as an explicit "disabled", so clearing the field silently switched off the protection rather than restoring the 30s default. An empty field now falls back to the default; only an explicit `0` disables it.
+- **Credentials are resolved as a pair.** The username and password were read independently, so a half-migrated node could combine a username from the credential store with a password from the flow file and fail to authenticate for no discoverable reason.
+
+### Fixed — resource limits and shutdown
+- **Connection resource controls added.** The socket is created with a 10s `handshakeTimeout`, so a peer that accepts TCP without completing the upgrade no longer leaves the node hanging indefinitely, and a 4 MiB `maxPayload` in place of ws's 100 MiB default. Outbound sends are refused once `bufferedAmount` exceeds 1 MiB rather than queuing without limit against a peer that has stopped reading.
+- **An HTTP upgrade rejection now uses the slow retry ladder.** Only a WebIQ JSON `project-not-found` reply got the 30 second delay; an HTTP 404 from a server or proxy during the upgrade fell through to the fast exponential ladder and hammered a route that could not start working on its own.
+- **A socket error during shutdown could defeat forced closure.** The teardown path finished directly from the `error` event, clearing the force timer before `close` was confirmed, so Node-RED could consider teardown complete while the socket was still alive. It now terminates the socket first.
+
 ### Fixed — API Request node
 - **The configured JSON is parsed once at construction** rather than on every message, and the parsed template is cloned per message so a downstream node mutating `msg.payload` cannot corrupt it for subsequent messages.
 - **Invalid JSON is now reported at deploy time** with a red status, and messages fail through `done(err)` instead of the node warning and then sending an empty object onward anyway — which produced two log lines per message and a payload the connection node was guaranteed to reject.
@@ -55,6 +66,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `.gitattributes` normalising line endings to LF in the repository. The repository held a mix of CRLF and LF blobs, which made `git diff --check` report trailing whitespace on every edited line.
 - Added the `LICENSE` file. `package.json` had declared `"license": "MIT"` since the first release with no licence text in the repository or the published tarball.
 - `package-lock.json` version resynced with `package.json`; it had been left at 1.1.3 through the 1.1.4 release.
+- **`npm test` now runs the full suite.** The adversarial release-gap tests sat behind a separate `test:gaps` script, so the default gate — and any CI using it — could pass while six regression tests were never evaluated.
+- **The README no longer ships a flow containing plaintext credentials.** It pointed users at an inline example carrying `username`/`password` as flat properties, recreating exactly the pattern this release removes. It now points at the packaged example and documents the 1.x migration.
+
+### Known limitations
+- **The connection is still plain `ws://`.** Credentials are protected at rest in the credential store but are not encrypted in transit; `wss://` and TLS configuration are not yet implemented.
+- The API Request node still accepts only a static JSON payload — there is no typedInput or `msg`/`flow`/`global`/`env` evaluation.
 
 ---
 

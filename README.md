@@ -37,11 +37,33 @@ npm install node-red-contrib-webiq
 3. Fill in or edit the example fields (`cmd`, `id`, `data`) to send commands to the WebIQ server.
 4. Deploy the changes.
 
-## Example Flow to import in Node-Red
+## Example Flow
 
-```json
-[{"id":"6ae4f887e84999f1","type":"tab","label":"Flow 1","disabled":false,"info":"","env":[]},{"id":"9c75c542f1c48c46","type":"webiq-api-connect","z":"6ae4f887e84999f1","name":"","host":"127.0.0.1","port":"10123","project":"f0362a66-4b94-4167-bfcb-1995290ad399","username":"Worker","password":"worker","x":540,"y":240,"wires":[["cb3ebb2cf607bc6e"]]},{"id":"4a8faf0286528557","type":"api-request","z":"6ae4f887e84999f1","name":"","data":"{\n    \"cmd\": \"io.read\",\n    \"id\": 0,\n    \"data\": [\"DSin\", \"SInt\"]\n}","x":310,"y":240,"wires":[["9c75c542f1c48c46"]]},{"id":"cb3ebb2cf607bc6e","type":"debug","z":"6ae4f887e84999f1","name":"debug 11","active":true,"tosidebar":true,"console":false,"tostatus":false,"complete":"true","targetType":"full","statusVal":"","statusType":"auto","x":730,"y":240,"wires":[]},{"id":"943c85ce0ced76f1","type":"inject","z":"6ae4f887e84999f1","name":"","props":[{"p":"payload"},{"p":"topic","vt":"str"}],"repeat":"","crontab":"","once":false,"onceDelay":0.1,"topic":"","payload":"","payloadType":"date","x":140,"y":240,"wires":[["4a8faf0286528557"]]}]
-```
+A ready-made example ships with the package. In the Node-RED editor open the menu
+and choose **Import → Examples → node-red-contrib-webiq → simple example**.
+
+It imports with the connection node **disabled** and no credentials filled in, so
+nothing starts connecting until you have entered your own server details and
+enabled the node.
+
+> **Do not paste connection nodes with credentials into issues, documentation or
+> chat.** From 2.0 the username and password are held in Node-RED's credential
+> store and are stripped from flow exports — that only protects you if the
+> credentials were entered in the editor rather than written into the flow JSON by
+> hand.
+
+## Migrating from 1.x
+
+The username and password moved out of the flow file and into Node-RED's
+credential store.
+
+A node created before 2.0 keeps working: the runtime falls back to the old
+properties and warns on deploy. To complete the migration, open each **WebIQ API
+Connect** node, re-enter the username and password, and deploy. Until you do, the
+credentials remain in `flows.json` in cleartext.
+
+Any password that has been exported, committed to version control or included in a
+backup should be rotated — it has been readable in plaintext for its entire life.
 
 ## Contributing
 

@@ -32,18 +32,22 @@ module.exports = function (RED) {
         const host = config.host;
         const port = config.port;
         const project = config.project;
-        const url = `ws://${host}:${port}/${project}/`;
 
         // Credentials live in Node-RED's separate credential store: it is not written
         // to flows.json and is excluded from flow exports. A username or password
         // still sitting on the node config comes from a pre-2.0 flow - honour it so
         // the node keeps working, but say so, because that value is in cleartext in
         // the flow file and in every export taken of it.
+        //
+        // The two are resolved as a pair, never mixed: a half-migrated node that took
+        // its username from the credential store and its password from the flow file
+        // would fail to log in for reasons nobody could reasonably diagnose.
         const credentials = node.credentials || {};
-        const username = credentials.username || config.username;
-        const password = credentials.password || config.password;
+        const hasStoredCredentials = !!(credentials.username || credentials.password);
+        const username = hasStoredCredentials ? credentials.username : config.username;
+        const password = hasStoredCredentials ? credentials.password : config.password;
 
-        if (!credentials.username && !credentials.password && (config.username || config.password)) {
+        if (!hasStoredCredentials && (config.username || config.password)) {
             node.warn('WebIQ credentials are stored in the flow file in cleartext. Open this node, re-enter the username and password, and redeploy to move them into the Node-RED credential store.');
         }
 
@@ -77,7 +81,15 @@ module.exports = function (RED) {
         // behind an event that the most common plant-network failure never emits.
         const defaultHeartbeatSeconds = 30;
         const maxHeartbeatSeconds = 3600;
-        const configuredHeartbeat = Number(config.heartbeat);
+
+        // An explicit 0 disables the heartbeat; an EMPTY field must fall back to the
+        // default. These are not the same thing, and Number('') === 0 conflates them -
+        // clearing the field would otherwise silently switch off the protection this
+        // release is built around.
+        const heartbeatProvided = config.heartbeat !== undefined &&
+            config.heartbeat !== null &&
+            String(config.heartbeat).trim() !== '';
+        const configuredHeartbeat = heartbeatProvided ? Number(config.heartbeat) : NaN;
         const heartbeatIsValid = Number.isFinite(configuredHeartbeat) && configuredHeartbeat >= 0;
         const heartbeatSeconds = heartbeatIsValid
             ? Math.min(configuredHeartbeat, maxHeartbeatSeconds)
@@ -89,20 +101,53 @@ module.exports = function (RED) {
         // look like a dead link.
         const heartbeatMissThreshold = 2;
 
-        function isValidHost(host) {
-            return !!(host && host.trim());
+        // Endpoint validation. Everything that would produce a malformed or
+        // surprising URL is caught here rather than at socket-construction time.
+        function buildEndpoint() {
+            if (!host || !String(host).trim()) {
+                return { error: 'Host is empty or missing.', status: 'host missing' };
+            }
+
+            const portNumber = Number(port);
+            if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) {
+                return {
+                    error: `Port "${port}" is not a valid TCP port (expected 1-65535).`,
+                    status: 'invalid port'
+                };
+            }
+
+            if (!project || String(project).trim() === '') {
+                return { error: 'WebIQ project name is empty or missing!', status: 'project missing' };
+            }
+
+            const trimmedProject = String(project).trim();
+            // A slash, query or fragment in the project would silently retarget the
+            // connection at a different path instead of failing.
+            if (/[\/?#\\]/.test(trimmedProject)) {
+                return {
+                    error: `WebIQ project "${trimmedProject}" contains a path separator or URL character.`,
+                    status: 'invalid project'
+                };
+            }
+
+            // A bare IPv6 literal has to be bracketed or the authority is ambiguous.
+            let trimmedHost = String(host).trim();
+            if ((trimmedHost.match(/:/g) || []).length >= 2 && trimmedHost[0] !== '[') {
+                trimmedHost = `[${trimmedHost}]`;
+            }
+
+            return {
+                url: `ws://${trimmedHost}:${portNumber}/${encodeURIComponent(trimmedProject)}/`
+            };
         }
 
-        if (!isValidHost(host)) {
-            node.status({ fill: 'red', shape: 'ring', text: 'host missing' });
-            node.error('Host is empty or missing.');
-            return;
-        }
+        const endpoint = buildEndpoint();
+        const configError = endpoint.error || null;
+        const url = endpoint.url;
 
-        if (!project || project.trim() === "") {
-            node.status({ fill: 'red', shape: 'ring', text: 'project missing' });
-            node.error("WebIQ project name is empty or missing!");
-            return;
+        if (configError) {
+            node.status({ fill: 'red', shape: 'ring', text: endpoint.status });
+            node.error(configError);
         }
 
         // Node-scoped state: only what genuinely outlives a single connection.
@@ -122,7 +167,18 @@ module.exports = function (RED) {
 
         // A project the server does not know is a configuration error, not a blip.
         // Retry it, but slowly.
-        const projectNotFoundRetryDelay = 30000;
+        const slowRetryDelay = 30000;
+
+        // Fail a stalled upgrade instead of hanging in CONNECTING forever, and cap
+        // inbound frames well below ws's 100 MiB default - this protocol never needs
+        // anything close to it.
+        const handshakeTimeoutMs = 10000;
+        const maxPayloadBytes = 4 * 1024 * 1024;
+
+        // Refuse to queue further sends once this much is already backed up. A peer
+        // that has stopped reading would otherwise let the send buffer grow without
+        // limit while readyState still reads OPEN.
+        const maxBufferedBytes = 1024 * 1024;
 
         // Backoff only resets once a connection has proven itself for this long.
         // Resetting on 'open' - or even on login - means a link that authenticates
@@ -237,7 +293,10 @@ module.exports = function (RED) {
 
             let socket;
             try {
-                socket = new WebSocket(url, 'smarthmi-connect');
+                socket = new WebSocket(url, 'smarthmi-connect', {
+                    handshakeTimeout: handshakeTimeoutMs,
+                    maxPayload: maxPayloadBytes
+                });
             } catch (err) {
                 // A malformed host or port throws synchronously here. Without a
                 // reconnect the node would stay dead until the next deploy, so keep
@@ -245,7 +304,7 @@ module.exports = function (RED) {
                 // by an environment variable or a restarted DNS entry.
                 node.status({ fill: 'red', shape: 'ring', text: 'invalid connection settings' });
                 node.error(`Could not create WebSocket connection: ${err.message}`);
-                scheduleReconnect(projectNotFoundRetryDelay);
+                scheduleReconnect(slowRetryDelay);
                 return;
             }
 
@@ -321,9 +380,13 @@ module.exports = function (RED) {
                 }
 
                 setState(ctx, STATE.RECONNECT_WAIT);
-                scheduleReconnect(ctx.failureKind === 'project-not-found'
-                    ? projectNotFoundRetryDelay
-                    : undefined);
+
+                // Both a WebIQ 404 and an HTTP upgrade rejection mean the endpoint is
+                // misconfigured, not momentarily unavailable. Hammering it on the fast
+                // ladder just pounds a route that cannot start working on its own.
+                const misconfigured = ctx.failureKind === 'project-not-found' ||
+                    String(ctx.failureKind).startsWith('http-upgrade-');
+                scheduleReconnect(misconfigured ? slowRetryDelay : undefined);
             };
 
             socket.on('open', ctx.handlers.open);
@@ -460,6 +523,15 @@ module.exports = function (RED) {
             // so every one of these failures used to vanish silently.
             done = done || function (err) { if (err) { node.error(err, msg); } };
 
+            // A misconfigured node still registers this handler. Returning early from
+            // the constructor used to leave the node with no input listener at all, so
+            // a message routed to it produced no output, no error, no Catch event and
+            // no done() - it simply vanished.
+            if (configError) {
+                done(new Error(`WebIQ node is not configured: ${configError}`));
+                return;
+            }
+
             const ctx = activeContext;
             const socket = ctx && ctx.socket;
 
@@ -491,6 +563,15 @@ module.exports = function (RED) {
                 serialized = JSON.stringify(msg.payload);
             } catch (err) {
                 done(new Error(`Could not serialise payload: ${err.message}`));
+                return;
+            }
+
+            // Backpressure: if the peer has stopped reading, refuse rather than grow
+            // the buffer indefinitely. A link that stays stalled is caught separately
+            // by the heartbeat, which sees no pong and terminates it.
+            if (socket.bufferedAmount > maxBufferedBytes) {
+                node.status({ fill: 'yellow', shape: 'ring', text: 'send buffer full' });
+                done(new Error(`WebIQ send buffer is backed up (${socket.bufferedAmount} bytes); dropping this request.`));
                 return;
             }
 
@@ -550,7 +631,14 @@ module.exports = function (RED) {
             if (typeof forceTimer.unref === 'function') { forceTimer.unref(); }
 
             socket.once('close', finish);
-            socket.once('error', finish);
+
+            // An error is not a close. Finishing straight from 'error' would clear the
+            // force timer and tell Node-RED teardown was done while the socket is
+            // still alive, so force it down first.
+            socket.once('error', function () {
+                try { socket.terminate(); } catch (_) {}
+                finish();
+            });
 
             try {
                 socket.close();
@@ -560,7 +648,11 @@ module.exports = function (RED) {
             }
         });
 
-        connect();
+        // Handlers above are registered unconditionally so a misconfigured node still
+        // answers messages; only the connection itself is skipped.
+        if (!configError) {
+            connect();
+        }
     }
 
     RED.nodes.registerType("webiq-api-connect", WebIQNode, {

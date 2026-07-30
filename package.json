@@ -4,7 +4,7 @@
   "description": "Node-RED nodes for WebIQ API integration.",
   "main": "webiq-api-connect.js",
   "scripts": {
-    "test": "node --test test/local-smoke.test.js test/heartbeat.test.js test/node-red-runtime.test.js",
+    "test": "node --test test/local-smoke.test.js test/heartbeat.test.js test/release-gaps.test.js test/node-red-runtime.test.js",
     "test:gaps": "node --test test/release-gaps.test.js",
     "test:node-red": "node --test test/node-red-runtime.test.js"
   },
