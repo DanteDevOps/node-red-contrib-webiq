@@ -40,6 +40,12 @@ try {
     skipReason = `openssl unavailable: ${err.message}`;
 }
 
+// In strict mode a missing prerequisite is a failure, not a skip. Without this a
+// release run can go green having exercised no TLS behaviour at all.
+if (skipReason && process.env.WEBIQ_STRICT_TESTS === '1') {
+    throw new Error(`WEBIQ_STRICT_TESTS=1 but TLS tests cannot run: ${skipReason}`);
+}
+
 // node:test treats the mere presence of a `skip` property as intent to skip, even
 // when its value is null - so the option object has to be absent, not falsy.
 const testOpts = skipReason ? { skip: skipReason } : {};
@@ -104,8 +110,7 @@ test('connects over wss:// using options from a tls-config node', testOpts, asyn
         host: 'localhost',
         port: String(server.port),
         project: 'test-project',
-        username: 'test-user',
-        password: 'test-password',
+        credentials: { username: 'test-user', password: 'test-password' },
         loginTimeout: 5,
         heartbeat: 0,
         tls: 'tls-config-1'
@@ -135,8 +140,7 @@ test('a rejected server certificate fails instead of silently downgrading', test
         host: 'localhost',
         port: String(server.port),
         project: 'test-project',
-        username: 'u',
-        password: 'p',
+        credentials: { username: 'u', password: 'p' },
         loginTimeout: 5,
         heartbeat: 0,
         tls: 'tls-config-1'
@@ -157,7 +161,9 @@ test('a rejected server certificate fails instead of silently downgrading', test
     assert.equal(server.requests.length, 0, 'no credential may reach an unverified server');
 });
 
-test('without TLS the scheme stays ws://', testOpts, async (t) => {
+// Deliberately not gated on openssl: this one needs no certificate, and folding it
+// into the skip made the whole file vanish when openssl was missing.
+test('without TLS the scheme stays ws://', async (t) => {
     const runtime = createRuntime(registerWebIQConnect);
     const node = runtime.create('webiq-api-connect', {
         host: '127.0.0.1',

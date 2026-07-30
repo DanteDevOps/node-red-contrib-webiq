@@ -11,6 +11,11 @@ const registerWebIQConnect = require('../webiq-api-connect');
 const runtimeDirectory = process.env.WEBIQ_NODE_RED_TEST_RUNTIME;
 
 if (!runtimeDirectory) {
+    // In strict mode this is a failure: a release must not be certified by a run
+    // that never touched a real Node-RED.
+    if (process.env.WEBIQ_STRICT_TESTS === '1') {
+        throw new Error('WEBIQ_STRICT_TESTS=1 but WEBIQ_NODE_RED_TEST_RUNTIME is not set, so the real Node-RED integration test cannot run.');
+    }
     test('real Node-RED runtime integration', {
         skip: 'Set WEBIQ_NODE_RED_TEST_RUNTIME to a directory containing node-red and node-red-node-test-helper'
     }, () => {});
@@ -83,9 +88,8 @@ if (!runtimeDirectory) {
                 host: '127.0.0.1',
                 port: String(server.address().port),
                 project: 'test-project',
-                username: 'test-user',
-                password: 'test-password',
                 loginTimeout: 1,
+                heartbeat: 0,
                 wires: [['output-1']]
             },
             {
@@ -95,9 +99,18 @@ if (!runtimeDirectory) {
             }
         ];
 
+        // Credentials go through Node-RED's credential store, not the flow object.
+        // Supplying them as flow properties would let a regression that ignored
+        // node.credentials pass this test unnoticed.
         await helper.load(
             [registerApiRequest, registerWebIQConnect],
-            flow
+            flow,
+            {
+                'connect-1': {
+                    username: 'test-user',
+                    password: 'test-password'
+                }
+            }
         );
 
         const requestNode = helper.getNode('request-1');

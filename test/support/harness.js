@@ -40,8 +40,13 @@ function createRuntime(registerNode) {
             }
         },
         nodes: {
-            createNode(node) {
+            createNode(node, config) {
                 const emitter = new EventEmitter();
+
+                // Node-RED populates node.credentials from its credential store, not
+                // from the flow properties. Mirroring that here is what makes a
+                // regression that ignored node.credentials actually fail.
+                node.credentials = (config && config.credentials) || {};
 
                 node.on = emitter.on.bind(emitter);
                 node.once = emitter.once.bind(emitter);
@@ -125,10 +130,13 @@ function createConnectionNode(runtime, port, overrides = {}) {
         host: '127.0.0.1',
         port: String(port),
         project: 'test-project',
-        username: 'test-user',
-        password: 'test-password',
         loginTimeout: 1,
-        ...overrides
+        ...overrides,
+        credentials: {
+            username: 'test-user',
+            password: 'test-password',
+            ...(overrides.credentials || {})
+        }
     });
 }
 

@@ -7,9 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [2.0.0] - unreleased
-
-> **Work in progress.** This entry is being filled in as the release is built.
+## [2.0.0] - 2026-07-30
 
 ### Added — WebIQ API Connect Node
 - **Connection heartbeat (the headline feature).** A new **Heartbeat** field (seconds, default `30`, `0` disables) sends a WebSocket ping once the connection is authenticated, and terminates the link after two consecutive intervals with no pong *and* no other inbound traffic. Any traffic counts as evidence of life, so a server that streams data but ignores pings is never treated as dead.
@@ -30,7 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Packaged example flow was broken and undiscoverable.** `Example/simple_example.json` still used the pre-1.1.1 `api-request` schema (separate `cmd` and `interval` properties), so importing it produced `Payload is missing required fields: cmd, id, data`. The directory has been renamed to lowercase `examples/`, which is the only name Node-RED scans for the editor's Import → Examples menu — the old flow had never been reachable from the palette at all. The replacement uses the current single-payload schema, ships with the connection node disabled, and carries no credentials or real project identifier.
 
 ### Breaking
-- **Credentials moved into Node-RED's credential store.** `username` and `password` were ordinary node properties, which meant every WebIQ password sat in cleartext in `flows.json`, travelled in every flow export, and was readable through the admin API. They are now declared as `credentials`, so Node-RED stores them separately and strips them from exports. **A node created before 2.0 keeps working** — the runtime falls back to the old properties and warns on deploy — **but the values remain in cleartext in your flow file until you reopen each connection node, re-enter both fields and redeploy.** Any password previously exported, committed or backed up should be rotated, because it has been readable in plaintext for its whole life.
+- **Credentials moved into Node-RED's credential store.** `username` and `password` were ordinary node properties, which meant every WebIQ password sat in cleartext in `flows.json`, travelled in every flow export, and was readable through the admin API. They are now declared as `credentials`, so Node-RED stores them separately and strips them from exports.
+
+  **There is deliberately no fallback to the old values.** Every connection node stops connecting after the upgrade, reports `credentials need re-entry`, and works again once you open it, type the username and password in, and redeploy. A fallback was implemented and then removed on review: Node-RED serializes only the properties a node declares, and the old ones are no longer declared, so *any* full deploy silently discards them. A node that worked immediately after upgrading and then lost its credentials on an unrelated deploy days later would be far harder to diagnose than one that fails at once and says why. **Record your credentials before upgrading.** Any password previously exported, committed or backed up should be rotated, because it has been readable in plaintext for its whole life.
 - **Input handlers now use the `(msg, send, done)` signature.** Failures are reported through `done(err)` instead of a bare `node.error(text)`. This is what makes **Catch** nodes fire — previously no Catch node anywhere could ever trap a failure from these nodes, and the message was dropped silently. Flows that relied on failures being invisible will now see them surface.
 
 ### Fixed — connection lifecycle
@@ -49,6 +49,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Endpoint validation added.** The port is checked as an integer in 1–65535 (previously an empty port silently dialled port 80 and blamed the project field); the project is rejected if it contains a path separator, `?`, `#` or `\`, and is URL-encoded rather than interpolated raw; a bare IPv6 literal is bracketed so the authority is unambiguous.
 - **An empty Heartbeat field no longer disables the heartbeat.** `Number('')` is `0`, which the validity check treated as an explicit "disabled", so clearing the field silently switched off the protection rather than restoring the 30s default. An empty field now falls back to the default; only an explicit `0` disables it.
 - **Credentials are resolved as a pair.** The username and password were read independently, so a half-migrated node could combine a username from the credential store with a password from the flow file and fail to authenticate for no discoverable reason.
+
+### Fixed — fail-closed security behaviour
+- **A TLS configuration that could not be resolved fell back to plaintext.** If the node referenced a `tls-config` node that no longer existed and the **Secure** checkbox was not also ticked, it warned and then connected over `ws://` — sending the credentials in cleartext at exactly the moment the user had asked for encryption. Reproduced against a plaintext server, which received the password and completed a login. Selecting a TLS configuration now always implies `wss://`, and an unresolvable reference is a configuration error that refuses to connect.
+- **Inbound `ping` frames now count as liveness.** Only `message` and `pong` reset the heartbeat, so a peer that actively pings this node but does not answer its pings was terminated as stale — contradicting the documented "any inbound traffic counts" behaviour.
+- **The backpressure warning now clears.** Once `send buffer full` was reported the node stayed yellow forever, even after later sends succeeded. The guard also ignored the size of the frame about to be queued, so a single large request could sail past the limit it was meant to be caught by.
+- **Transient HTTP upgrade failures are no longer treated as misconfiguration.** Every upgrade status was classified as permanent, so `429`, `502`, `503` and `504` waited on the slow 30 second ladder and were reported as "check the project name". Only `400`, `401`, `403`, `404`, `410` and `501` are now permanent; everything else retries on the normal ladder and reports as `server unavailable`.
 
 ### Fixed — resource limits and shutdown
 - **Connection resource controls added.** The socket is created with a 10s `handshakeTimeout`, so a peer that accepts TCP without completing the upgrade no longer leaves the node hanging indefinitely, and a 4 MiB `maxPayload` in place of ws's 100 MiB default. Outbound sends are refused once `bufferedAmount` exceeds 1 MiB rather than queuing without limit against a peer that has stopped reading.
@@ -69,7 +75,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `.gitattributes` normalising line endings to LF in the repository. The repository held a mix of CRLF and LF blobs, which made `git diff --check` report trailing whitespace on every edited line.
 - Added the `LICENSE` file. `package.json` had declared `"license": "MIT"` since the first release with no licence text in the repository or the published tarball.
 - `package-lock.json` version resynced with `package.json`; it had been left at 1.1.3 through the 1.1.4 release.
-- **`npm test` now runs the full suite.** The adversarial release-gap tests sat behind a separate `test:gaps` script, so the default gate — and any CI using it — could pass while six regression tests were never evaluated.
+- **`npm test` now runs the full suite**, and a new **`npm run test:release`** gate refuses to pass when any suite is skipped for a missing prerequisite. Previously the release-gap tests sat behind a separate script, and the TLS and real-runtime suites skipped silently when OpenSSL or a Node-RED install was absent — so a green run could mean no TLS behaviour had been exercised at all. Verified: 29 tests, 0 skipped, against real Node-RED 5.
+- **The tests now supply credentials the way Node-RED does**, through the credential store rather than as flow properties. A regression that ignored `node.credentials` entirely would previously have passed every test.
 - **The README no longer ships a flow containing plaintext credentials.** It pointed users at an inline example carrying `username`/`password` as flat properties, recreating exactly the pattern this release removes. It now points at the packaged example and documents the 1.x migration.
 
 - **The README now carries an upgrade guide and a troubleshooting table**, covering the credential migration step by step, the Catch-node behaviour change, and what every status badge and error message means.

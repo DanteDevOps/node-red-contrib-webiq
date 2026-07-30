@@ -25,6 +25,11 @@ module.exports = function (RED) {
     // would otherwise sit on ws's own 30s close timer and blow through it.
     const CLOSE_GRACE_MS = 2000;
 
+    // HTTP statuses on the upgrade that mean the endpoint itself is wrong. Anything
+    // else - notably 429 and 5xx - is a busy or broken server and is retried on the
+    // normal ladder.
+    const PERMANENT_UPGRADE_CODES = [400, 401, 403, 404, 410, 501];
+
     function WebIQNode(config) {
         RED.nodes.createNode(this, config);
         const node = this;
@@ -33,23 +38,16 @@ module.exports = function (RED) {
         const port = config.port;
         const project = config.project;
 
-        // Credentials live in Node-RED's separate credential store: it is not written
-        // to flows.json and is excluded from flow exports. A username or password
-        // still sitting on the node config comes from a pre-2.0 flow - honour it so
-        // the node keeps working, but say so, because that value is in cleartext in
-        // the flow file and in every export taken of it.
-        //
-        // The two are resolved as a pair, never mixed: a half-migrated node that took
-        // its username from the credential store and its password from the flow file
-        // would fail to log in for reasons nobody could reasonably diagnose.
+        // Credentials come only from Node-RED's credential store. There is
+        // deliberately no fallback to the flat config properties a 1.x flow used:
+        // those properties are no longer declared defaults, so Node-RED drops them
+        // on any full deploy. A fallback would let the node work after upgrading and
+        // then lose its credentials at an unpredictable later moment - failing
+        // immediately with an explicit message is far easier to act on.
         const credentials = node.credentials || {};
-        const hasStoredCredentials = !!(credentials.username || credentials.password);
-        const username = hasStoredCredentials ? credentials.username : config.username;
-        const password = hasStoredCredentials ? credentials.password : config.password;
-
-        if (!hasStoredCredentials && (config.username || config.password)) {
-            node.warn('WebIQ credentials are stored in the flow file in cleartext. Open this node, re-enter the username and password, and redeploy to move them into the Node-RED credential store.');
-        }
+        const username = credentials.username;
+        const password = credentials.password;
+        const hasLegacyCredentials = !!(config.username || config.password);
 
         // Login timeout is configurable (seconds) because slow PLC-backed projects
         // can take well over the old hardcoded 5s to answer a login.
@@ -106,19 +104,34 @@ module.exports = function (RED) {
         // fields and sets rejectUnauthorized from its own "verify server
         // certificate" checkbox. We never set that ourselves, so this cannot
         // silently downgrade to an unverified connection.
-        const tlsConfigNode = (config.tls && RED.nodes && typeof RED.nodes.getNode === 'function')
+        // Asking for TLS always means wss://. An unresolvable reference is a
+        // configuration error, never a quiet downgrade: falling back to ws:// would
+        // hand the credentials to a plaintext socket precisely when the user had
+        // asked for encryption.
+        const tlsRequested = !!config.tls;
+        const tlsConfigNode = (tlsRequested && RED.nodes && typeof RED.nodes.getNode === 'function')
             ? RED.nodes.getNode(config.tls)
             : null;
-        const useTls = !!(config.secure || tlsConfigNode);
+        const useTls = !!(config.secure || tlsRequested);
         const scheme = useTls ? 'wss' : 'ws';
-
-        if (config.tls && !tlsConfigNode) {
-            node.warn('A TLS configuration was selected but could not be resolved; falling back to the node\'s own secure setting.');
-        }
 
         // Endpoint validation. Everything that would produce a malformed or
         // surprising URL is caught here rather than at socket-construction time.
         function buildEndpoint() {
+            if (tlsRequested && !tlsConfigNode) {
+                return {
+                    error: 'A TLS configuration is selected but could not be resolved. Refusing to connect: falling back to an unencrypted connection would send the credentials in cleartext.',
+                    status: 'TLS config unresolved'
+                };
+            }
+
+            if (hasLegacyCredentials && !username && !password) {
+                return {
+                    error: 'WebIQ credentials must be re-entered after upgrading to 2.0. Open this node, type the username and password again, and redeploy - they are now held in Node-RED\'s credential store instead of the flow file.',
+                    status: 'credentials need re-entry'
+                };
+            }
+
             if (!host || !String(host).trim()) {
                 return { error: 'Host is empty or missing.', status: 'host missing' };
             }
@@ -170,6 +183,7 @@ module.exports = function (RED) {
         let reconnectTimer = null;
         let reconnectDelay = 1000;
         let closing = false;
+        let sendDegraded = false;
 
         const initialReconnectDelay = 1000;
         const maxReconnectDelay = 30000;
@@ -207,6 +221,7 @@ module.exports = function (RED) {
                 pendingLoginId: null,
                 authenticatedAt: null,
                 failureKind: null,
+                upgradePermanent: false,
                 loginAttempted: false,
                 authFailures: 0,
                 missedHeartbeats: 0,
@@ -329,6 +344,7 @@ module.exports = function (RED) {
 
             const ctx = createContext(socket);
             activeContext = ctx;
+            sendDegraded = false;
             setState(ctx, STATE.CONNECTING, { fill: 'red', shape: 'ring', text: 'disconnected' });
 
             ctx.handlers.open = function () {
@@ -339,6 +355,13 @@ module.exports = function (RED) {
             };
 
             ctx.handlers.pong = function () {
+                if (!owns(ctx)) { return; }
+                markAlive(ctx);
+            };
+
+            // A peer that pings us is demonstrably alive, even if it never answers
+            // our own pings. Without this, "any inbound traffic counts" is not true.
+            ctx.handlers.ping = function () {
                 if (!owns(ctx)) { return; }
                 markAlive(ctx);
             };
@@ -368,9 +391,22 @@ module.exports = function (RED) {
                 // of the URL path is wrong.
                 const upgrade = /Unexpected server response: (\d{3})/.exec(err.message || '');
                 if (upgrade) {
-                    ctx.failureKind = 'http-upgrade-' + upgrade[1];
-                    node.status({ fill: 'red', shape: 'ring', text: `server rejected upgrade (HTTP ${upgrade[1]})` });
-                    node.error(`WebIQ server rejected the WebSocket upgrade with HTTP ${upgrade[1]}: check the project name in the connection URL.`);
+                    const code = Number(upgrade[1]);
+                    ctx.failureKind = 'http-upgrade-' + code;
+
+                    // Only codes that mean "this endpoint is wrong" are permanent.
+                    // 429 and 5xx are a busy or broken server or proxy, and will very
+                    // likely work again shortly - putting them on the slow ladder
+                    // delays recovery for no reason and misdiagnoses the cause.
+                    ctx.upgradePermanent = PERMANENT_UPGRADE_CODES.indexOf(code) !== -1;
+
+                    if (ctx.upgradePermanent) {
+                        node.status({ fill: 'red', shape: 'ring', text: `server rejected upgrade (HTTP ${code})` });
+                        node.error(`WebIQ server rejected the WebSocket upgrade with HTTP ${code}: check the project name and the connection URL.`);
+                    } else {
+                        node.status({ fill: 'yellow', shape: 'ring', text: `server unavailable (HTTP ${code})` });
+                        node.warn(`WebIQ server or proxy returned HTTP ${code} to the WebSocket upgrade; retrying.`);
+                    }
                     return;
                 }
 
@@ -390,7 +426,8 @@ module.exports = function (RED) {
                     // don't overwrite the more specific badge with a generic one.
                     node.status({ fill: 'red', shape: 'ring', text: 'project not found' });
                 } else if (String(ctx.failureKind).startsWith('http-upgrade-')) {
-                    // Ditto for an upgrade rejection.
+                    // Ditto for an upgrade rejection - the error handler already
+                    // reported it with the right severity for the status code.
                 } else if (!ctx.loginAttempted) {
                     node.status({ fill: 'red', shape: 'ring', text: 'project not found / connection failed' });
                     node.error('WebIQ project may be invalid or server unreachable.');
@@ -404,13 +441,14 @@ module.exports = function (RED) {
                 // misconfigured, not momentarily unavailable. Hammering it on the fast
                 // ladder just pounds a route that cannot start working on its own.
                 const misconfigured = ctx.failureKind === 'project-not-found' ||
-                    String(ctx.failureKind).startsWith('http-upgrade-');
+                    ctx.upgradePermanent === true;
                 scheduleReconnect(misconfigured ? slowRetryDelay : undefined);
             };
 
             socket.on('open', ctx.handlers.open);
             socket.on('message', ctx.handlers.message);
             socket.on('pong', ctx.handlers.pong);
+            socket.on('ping', ctx.handlers.ping);
             socket.on('error', ctx.handlers.error);
             socket.on('close', ctx.handlers.close);
         }
@@ -587,10 +625,14 @@ module.exports = function (RED) {
 
             // Backpressure: if the peer has stopped reading, refuse rather than grow
             // the buffer indefinitely. A link that stays stalled is caught separately
-            // by the heartbeat, which sees no pong and terminates it.
-            if (socket.bufferedAmount > maxBufferedBytes) {
+            // by the heartbeat, which sees no traffic and terminates it. The frame
+            // about to be queued counts towards the limit - ignoring it would let a
+            // single large request sail past the check it is meant to be caught by.
+            const frameBytes = Buffer.byteLength(serialized);
+            if (socket.bufferedAmount + frameBytes > maxBufferedBytes) {
+                sendDegraded = true;
                 node.status({ fill: 'yellow', shape: 'ring', text: 'send buffer full' });
-                done(new Error(`WebIQ send buffer is backed up (${socket.bufferedAmount} bytes); dropping this request.`));
+                done(new Error(`WebIQ send buffer is backed up (${socket.bufferedAmount} bytes queued, this request adds ${frameBytes}); dropping this request.`));
                 return;
             }
 
@@ -598,6 +640,13 @@ module.exports = function (RED) {
                 if (err) {
                     done(err);
                     return;
+                }
+                // Recovered: a send got through, so stop showing the warning badge.
+                if (sendDegraded) {
+                    sendDegraded = false;
+                    if (isAuthenticated()) {
+                        node.status({ fill: 'green', shape: 'dot', text: 'authenticated' });
+                    }
                 }
                 done();
             });

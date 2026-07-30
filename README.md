@@ -58,46 +58,61 @@ enabled the node.
 
 ## Upgrading from 1.x
 
-Nothing stops working the moment you upgrade — but two things need your attention,
-and one of them is a security action.
+**2.0 is a breaking release. Read this before upgrading a production system.**
 
-### 1. Move your credentials (required)
+### Prerequisites
 
-The username and password moved out of the flow file into Node-RED's credential
-store. A node created before 2.0 keeps connecting, because the runtime falls back
-to the old properties, but it warns on every deploy:
+| | 1.x | 2.0 |
+| --- | --- | --- |
+| Node-RED | >= 3.0 | **>= 4.0** (4 and 5 both supported) |
+| Node.js | >= 18 | **>= 20** |
 
-> WebIQ credentials are stored in the flow file in cleartext. Open this node,
-> re-enter the username and password, and redeploy...
+If your installation is older than that, `npm install` will refuse or Node-RED will
+fail to load the nodes. Check with `node --version` and the Node-RED startup log
+before upgrading. Node.js 20 is past end-of-life upstream; 22 or later is
+recommended, and Node-RED 5 requires 22.9 regardless of this package.
 
-To finish the move, for **each** WebIQ API Connect node:
+### Step 1 — re-enter your credentials (required, do this first)
 
-1. Open the node. **Write down the username and password before changing anything** —
-   the fields may appear blank, because the credential store has nothing in it yet
-   while the real values are still in the flow file.
-2. Type the username and password in again.
-3. Click **Done**, then **Deploy**.
-4. Confirm it worked: export the flow (**menu → Export**) and check that no
-   `"username"` or `"password"` appears in the JSON.
+The username and password have moved out of the flow file into Node-RED's
+credential store. **There is no fallback to the old values**, so every WebIQ API
+Connect node stops connecting until you re-enter them. The node tells you so:
 
-> **Do this before making unrelated edits to a connection node.** Once you open and
-> save a node, the old plaintext properties are dropped. If you save without
-> re-entering the credentials, the node has no credentials in either place and will
-> fail to log in — fixable by typing them in again, but confusing if it catches you
-> mid-deploy.
+> WebIQ credentials must be re-entered after upgrading to 2.0...
+
+and its status reads `credentials need re-entry`.
+
+This is deliberate. An automatic fallback was considered and rejected: Node-RED
+serializes only the properties a node declares, and the old `username`/`password`
+are no longer declared — so **any full deploy silently discards them**. A node that
+worked after upgrading and then lost its credentials on an unrelated deploy days
+later would be far harder to diagnose than one that fails immediately.
+
+Before upgrading:
+
+1. **Write down the username and password for every connection node**, or export
+   your flows and keep the export somewhere safe. Once the new version loads, the
+   editor fields are blank and the old values are only recoverable from a backup.
+
+After upgrading, for each **WebIQ API Connect** node:
+
+2. Open it, type the username and password in again, click **Done**.
+3. **Deploy.**
+4. Confirm: export the flow (**menu → Export**) and check that no `"username"` or
+   `"password"` appears in the JSON.
 
 **Rotate any password that was previously exported, committed to version control, or
 included in a backup.** It has been readable in plaintext for its entire life, and
 moving it into the credential store does not undo that.
 
-### 2. Catch nodes now fire (behaviour change)
+### Step 2 — expect Catch nodes to start firing (behaviour change)
 
 In 1.x, failures from these nodes never reached a **Catch** node — the message was
 dropped silently. They are now reported properly, so if you have a catch-all Catch
 node, it may start receiving errors it has never seen before from flows you did not
 change. Those errors were always happening; they were just invisible.
 
-### 3. Optional but recommended
+### Step 3 — optional but recommended
 
 - **Turn on Secure** if your WebIQ server terminates TLS. 1.x could only speak
   `ws://`, so credentials crossed the network unencrypted.
@@ -111,6 +126,8 @@ The node's status badge names the problem. The most common ones:
 
 | Status / message | What it means | What to do |
 | --- | --- | --- |
+| `credentials need re-entry` | A 1.x node still has its credentials in the flow file. | Open the node, type the username and password in again, redeploy. See *Upgrading from 1.x*. |
+| `TLS config unresolved` | A TLS configuration is selected but the config node is missing. | The node refuses to connect rather than silently falling back to unencrypted — re-select or recreate the `tls-config` node. |
 | `host missing` | The Host field is empty. | Fill it in. |
 | `invalid port` | Port is not an integer in 1–65535. | In 1.x an empty port silently dialled port 80 and reported it as a project failure. Set the real port, usually `10123`. |
 | `project missing` / `invalid project` | Project is empty, or contains `/`, `?`, `#` or `\`. | Use the project name or UUID only, not a URL or path. |
@@ -118,7 +135,8 @@ The node's status badge names the problem. The most common ones:
 | `login timeout / project not found` | No login reply within the timeout. | Raise **Login timeout**; if it persists, check the project name and that the project is actually running. |
 | `connected - login failed` | The server rejected the credentials. | Check username and password. Retries back off to 60 s, so you will not lock the account out — but nothing will work until they are right. |
 | `project not found` | The server replied with a 404. | The project name or UUID is wrong, or the project is not loaded yet. Retries every 30 s. |
-| `server rejected upgrade (HTTP 404)` | The server never accepted the WebSocket at all. | Different from the above: check host, port and any reverse proxy in front of WebIQ. |
+| `server rejected upgrade (HTTP 404)` | The server never accepted the WebSocket at all. | Different from the above: check host, port and any reverse proxy in front of WebIQ. Applies to 400/401/403/404/410/501, which are retried slowly. |
+| `server unavailable (HTTP 503)` | The server or proxy is busy or broken, not misconfigured. | Transient — 429 and 5xx are retried on the normal fast ladder. No action usually needed. |
 | `project not found / connection failed` | The socket closed before a login was attempted. | Server unreachable, wrong port, or a firewall in the way. |
 | `link stale - reconnecting` | Two heartbeats passed with no traffic and no pong. | Normal after a network drop — it reconnects automatically. Persistent flapping means the server does not answer pings; consider raising **Heartbeat** or setting it to `0`. |
 | `send buffer full` | The server has stopped reading and 1 MB is queued. | Requests are being dropped rather than buffered forever. Check server load. |
