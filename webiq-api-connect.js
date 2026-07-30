@@ -101,6 +101,21 @@ module.exports = function (RED) {
         // look like a dead link.
         const heartbeatMissThreshold = 2;
 
+        // TLS. Certificate handling is delegated entirely to Node-RED's own
+        // tls-config node, which owns the CA / client-certificate / passphrase
+        // fields and sets rejectUnauthorized from its own "verify server
+        // certificate" checkbox. We never set that ourselves, so this cannot
+        // silently downgrade to an unverified connection.
+        const tlsConfigNode = (config.tls && RED.nodes && typeof RED.nodes.getNode === 'function')
+            ? RED.nodes.getNode(config.tls)
+            : null;
+        const useTls = !!(config.secure || tlsConfigNode);
+        const scheme = useTls ? 'wss' : 'ws';
+
+        if (config.tls && !tlsConfigNode) {
+            node.warn('A TLS configuration was selected but could not be resolved; falling back to the node\'s own secure setting.');
+        }
+
         // Endpoint validation. Everything that would produce a malformed or
         // surprising URL is caught here rather than at socket-construction time.
         function buildEndpoint() {
@@ -137,7 +152,7 @@ module.exports = function (RED) {
             }
 
             return {
-                url: `ws://${trimmedHost}:${portNumber}/${encodeURIComponent(trimmedProject)}/`
+                url: `${scheme}://${trimmedHost}:${portNumber}/${encodeURIComponent(trimmedProject)}/`
             };
         }
 
@@ -293,10 +308,14 @@ module.exports = function (RED) {
 
             let socket;
             try {
-                socket = new WebSocket(url, 'smarthmi-connect', {
+                const socketOptions = {
                     handshakeTimeout: handshakeTimeoutMs,
                     maxPayload: maxPayloadBytes
-                });
+                };
+                if (tlsConfigNode && typeof tlsConfigNode.addTLSOptions === 'function') {
+                    tlsConfigNode.addTLSOptions(socketOptions);
+                }
+                socket = new WebSocket(url, 'smarthmi-connect', socketOptions);
             } catch (err) {
                 // A malformed host or port throws synchronously here. Without a
                 // reconnect the node would stay dead until the next deploy, so keep

@@ -6,6 +6,39 @@ function createRuntime(registerNode) {
     const registeredTypes = new Map();
 
     const RED = {
+        // Minimal stand-ins for the RED.util helpers the nodes use. These exercise
+        // the plumbing - callback shape, error routing, validation - not Node-RED's
+        // real evaluation semantics; the opt-in node-red-runtime test covers those.
+        util: {
+            cloneMessage(value) {
+                return JSON.parse(JSON.stringify(value));
+            },
+            evaluateNodeProperty(value, type, node, msg, callback) {
+                let result;
+                try {
+                    if (type === 'json') {
+                        result = JSON.parse(value);
+                    } else if (type === 'msg') {
+                        result = String(value).split('.').reduce(
+                            (acc, key) => (acc === undefined || acc === null ? acc : acc[key]),
+                            msg
+                        );
+                    } else if (type === 'env') {
+                        result = process.env[value];
+                    } else if (type === 'flow' || type === 'global') {
+                        const store = type === 'flow' ? node._flowContext : node._globalContext;
+                        result = store ? store[value] : undefined;
+                    } else {
+                        result = value;
+                    }
+                } catch (err) {
+                    if (callback) { return callback(err); }
+                    throw err;
+                }
+                if (callback) { return callback(null, result); }
+                return result;
+            }
+        },
         nodes: {
             createNode(node) {
                 const emitter = new EventEmitter();

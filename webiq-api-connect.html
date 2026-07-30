@@ -7,6 +7,8 @@
             host: { value: "" },
             port: { value: "" },
             project: { value: "" },
+            secure: { value: false },
+            tls: { value: "", type: "tls-config", required: false },
             loginTimeout: {
                 value: 5,
                 validate: function (v) {
@@ -41,6 +43,21 @@
         paletteLabel: "WebIQ connect",
         label: function () {
             return this.name || "WebIQ API Connect";
+        },
+        oneditprepare: function () {
+            // Selecting a TLS configuration implies wss://, so keep the checkbox
+            // and the config-node picker from contradicting each other.
+            function syncTls() {
+                var hasTlsConfig = $("#node-input-tls").val() &&
+                    $("#node-input-tls").val() !== "_ADD_";
+                if (hasTlsConfig) {
+                    $("#node-input-secure").prop("checked", true);
+                }
+                $("#node-row-tls").toggle($("#node-input-secure").is(":checked"));
+            }
+            $("#node-input-secure").on("change", syncTls);
+            $("#node-input-tls").on("change", syncTls);
+            syncTls();
         }
     });
 </script>
@@ -61,6 +78,15 @@
     <div class="form-row">
         <label for="node-input-project"><i class="fa fa-folder"></i> Project</label>
         <input type="text" id="node-input-project" placeholder="Project">
+    </div>
+    <div class="form-row">
+        <label for="node-input-secure"><i class="fa fa-lock"></i> Secure</label>
+        <input type="checkbox" id="node-input-secure" style="width:auto; vertical-align:top;">
+        <span>Connect with <code>wss://</code> (TLS)</span>
+    </div>
+    <div class="form-row" id="node-row-tls">
+        <label for="node-input-tls"><i class="fa fa-certificate"></i> TLS config</label>
+        <input type="text" id="node-input-tls">
     </div>
     <div class="form-row">
         <label for="node-input-username"><i class="fa fa-user"></i> Username</label>
@@ -107,6 +133,18 @@
 
         <dt>Project <span class="property-type">string</span></dt>
         <dd>WebIQ project name or UUID.</dd>
+
+        <dt>Secure <span class="property-type">boolean</span></dt>
+        <dd>Connect with <code>wss://</code> instead of <code>ws://</code>. Without it
+            the login frame - and every value read from or written to the PLC - crosses
+            the network in cleartext.</dd>
+
+        <dt>TLS config <span class="property-type">tls-config</span></dt>
+        <dd>Optional. Points at a standard Node-RED <b>tls-config</b> node for custom
+            CAs, client certificates or a passphrase. Selecting one implies
+            <b>Secure</b>. Certificate verification is controlled by that node's own
+            <i>Verify server certificate</i> setting; this node never overrides it, so
+            enabling TLS cannot silently fall back to an unverified connection.</dd>
 
         <dt>Username <span class="property-type">credential</span></dt>
         <dd>WebIQ project username. Stored in Node-RED's credential store, not in

@@ -10,13 +10,22 @@ RED.nodes.registerType('api-request', {
     "id": 0,
     "data": ["DSin", "SInt"]
 }`
-        }
+        },
+        // Absent on nodes created before the typed input existed; those are JSON.
+        dataType: { value: "json" }
     },
     inputs: 1,
     outputs: 1,
     icon: "envelope.svg",
     paletteLabel: "WebIQ request",
-    label: function() { return this.name || "API Request"; }
+    label: function() { return this.name || "API Request"; },
+    oneditprepare: function() {
+        $("#node-input-data").typedInput({
+            default: "json",
+            typeField: "#node-input-dataType",
+            types: ["json", "msg", "flow", "global", "env"]
+        });
+    }
 });
 </script>
 
@@ -27,25 +36,35 @@ RED.nodes.registerType('api-request', {
 </div>
 <div class="form-row">
     <label for="node-input-data"><i class="fa fa-code"></i> Data</label>
-    <!-- Left empty on purpose: the editor fills this from defaults.data above.
-         Inlining a second copy of the JSON here only creates two versions that
-         drift apart. -->
-    <textarea id="node-input-data" style="width:100%; height:120px;"></textarea>
+    <!-- typedInput needs a text input, not a textarea; it renders its own expanding
+         JSON editor for the json type. Value comes from defaults.data. -->
+    <input type="text" id="node-input-data" style="width:70%;">
+    <input type="hidden" id="node-input-dataType">
 </div>
 <div class="form-tips">
-    The full JSON payload sent to the WebIQ server. It must contain
-    <code>cmd</code>, <code>id</code> and <code>data</code>, or the connection node
-    will reject it.
+    The request sent to the WebIQ server. Choose <b>JSON</b> to write it inline, or
+    <b>msg</b> / <b>flow</b> / <b>global</b> / <b>env</b> to take it from elsewhere at
+    runtime. However it is produced, it must contain <code>cmd</code>, <code>id</code>
+    and <code>data</code>.
 </div>
 </script>
 
 <script type="text/html" data-help-name="api-request">
-<p>This node sends a full JSON payload as specified in the Data field. Example:</p>
-<pre>
-{
-    "cmd": "io.read",
-    "id": 0,
-    "data": ["DSin", "SInt"]
-}
-</pre>
+<p>Builds a WebIQ request and forwards it to a <b>WebIQ API Connect</b> node.</p>
+
+<h3>Data</h3>
+<dl class="message-properties">
+    <dt>json</dt>
+    <dd>The request written inline. Parsed once when the node is deployed, so a
+        syntax error shows on the canvas immediately rather than on the first
+        message.</dd>
+
+    <dt>msg / flow / global / env</dt>
+    <dd>The request is read from that source for every message, so it can change at
+        runtime. A JSON string is parsed automatically.</dd>
+</dl>
+
+<p>Whatever the source, the value must contain <code>cmd</code>, <code>id</code> and
+   <code>data</code>. If it does not, the message fails with an error naming what is
+   missing, and can be trapped with a <b>Catch</b> node.</p>
 </script>
