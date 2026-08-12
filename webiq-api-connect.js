@@ -43,30 +43,68 @@ module.exports = function (RED) {
     // Server-controlled text ends up in status badges, log lines and Error objects
     // that flows replay. One choke point bounds it: control characters stripped
     // (no ANSI/log forgery), length capped (no multi-megabyte Error messages).
-    function sanitizeServerText(value) {
-        let text;
+    // Total coercion, no truncation: safe to call on anything, including a value
+    // whose toString is null (which JSON can express and String() throws on).
+    function coerceServerText(value) {
         try {
-            text = typeof value === 'string' ? value : String(value);
+            return typeof value === 'string' ? value : String(value);
         } catch (_) {
-            // JSON can express {"toString": null}, and String() on that throws
-            // "Cannot convert object to primitive value". This runs inside a ws
-            // event handler, so an escaping throw reaches Node-RED's uncaught
-            // handler and terminates the entire runtime - one malformed frame
-            // from the server would take the gateway down.
-            text = '[unprintable value]';
+            // Thrown inside a ws event handler this would reach Node-RED's
+            // uncaught handler and terminate the runtime.
+            return '[unprintable value]';
         }
+    }
+
+    // Presentation form: bounded for badges, logs and Error messages. Never use
+    // this for MATCHING - the cap would silently narrow the test.
+    function sanitizeServerText(value) {
         // Built without any literal control character in the source: writing the
         // class inline embeds raw bytes and turns this file into a binary blob.
         let out = '';
-        for (const ch of text.slice(0, 200)) {
+        for (const ch of coerceServerText(value).slice(0, 200)) {
             const c = ch.codePointAt(0);
             out += (c < 32 || c === 127) ? ' ' : ch;
         }
         return out;
     }
 
-    function describeServerError(error) {
-        if (!error) { return 'unknown error'; }
+    // Deepest nesting accepted in a server frame. A WebIQ frame never needs
+    // anything close to this.
+    //
+    // maxPayload bounds a frame's SIZE but not its SHAPE, and Node-RED clones a
+    // message recursively - once per wired Catch node, and once per output wire
+    // after the first. A 16 KB frame nested 8000 deep therefore makes cloneMessage
+    // throw RangeError inside this node's ws event handler, which reaches
+    // Node-RED's uncaught handler and terminates the whole runtime. Bounding the
+    // text alone does not close that; the structure has to be bounded too.
+    const MAX_FRAME_DEPTH = 64;
+
+    // Iterative on purpose: a recursive depth check would blow the stack on
+    // exactly the input it exists to reject.
+    function exceedsMaxDepth(value, maxDepth) {
+        const stack = [{ node: value, depth: 0 }];
+        while (stack.length) {
+            const { node: current, depth } = stack.pop();
+            if (current === null || typeof current !== 'object') { continue; }
+            if (depth >= maxDepth) { return true; }
+            const keys = Object.keys(current);
+            for (let i = 0; i < keys.length; i += 1) {
+                stack.push({ node: current[keys[i]], depth: depth + 1 });
+            }
+        }
+        return false;
+    }
+
+    function normaliseServerError(error) {
+        // WebIQ sends an object, but a server or proxy can send a bare string.
+        // Without this, a string error defeats lockout detection entirely.
+        if (typeof error === 'string') { return { message: error }; }
+        return error;
+    }
+
+    function describeServerError(rawError) {
+        const error = normaliseServerError(rawError);
+        if (!error || typeof error !== 'object') { return 'unknown error'; }
         const parts = [];
         if (error.category) { parts.push(sanitizeServerText(error.category)); }
         if (error.errc !== undefined) { parts.push('errc ' + sanitizeServerText(error.errc)); }
@@ -106,20 +144,32 @@ module.exports = function (RED) {
         }
         if (colons === 1) { return reject('it includes a port'); }
 
-        // Hostnames, IPv4, Docker container names and short container IDs. The
-        // underscore is deliberate: Docker names use it and 1.1.4 exists because
-        // stricter parsing rejected them.
-        if (!/^[A-Za-z0-9._-]+$/.test(value)) { return reject('it contains characters that are not valid in a hostname'); }
+        // Within ASCII only hostname characters are allowed - that is what keeps
+        // authority syntax out. Non-ASCII is deliberately left alone so
+        // internationalised domain names keep working (ws/Node punycode them);
+        // an allow-list of ASCII letters would have rejected every IDN host that
+        // worked before this validation existed. The underscore is deliberate too:
+        // Docker names use it, and 1.1.4 exists because stricter parsing once
+        // rejected Docker container names.
+        for (const ch of value) {
+            const c = ch.codePointAt(0);
+            if (c < 128 && !/[A-Za-z0-9._-]/.test(ch)) {
+                return reject(`it contains "${ch}", which is not valid in a hostname`);
+            }
+        }
 
         return { host: value };
     }
 
-    function isLockout(error) {
-        if (!error) { return false; }
-        // Both reads go through the total sanitizer: a raw String() here is the
-        // same crash vector as in describeServerError.
-        if (error.errc === LOCKOUT_ERRC && /user/.test(sanitizeServerText(error.category || ''))) { return true; }
-        return LOCKOUT_PATTERN.test(sanitizeServerText(error.message || ''));
+    function isLockout(rawError) {
+        const error = normaliseServerError(rawError);
+        if (!error || typeof error !== 'object') { return false; }
+        // Coerced safely but NOT truncated: sanitizeServerText caps at 200
+        // characters for display, and matching against the capped text would miss
+        // a lockout whose wording runs long - silently turning "stop now" into
+        // "retry a few more times" against an account the HMI also uses.
+        if (error.errc === LOCKOUT_ERRC && /user/.test(coerceServerText(error.category || ''))) { return true; }
+        return LOCKOUT_PATTERN.test(coerceServerText(error.message || ''));
     }
 
     function WebIQNode(config) {
@@ -364,10 +414,10 @@ module.exports = function (RED) {
         const reconnectCooldownMs = 60000;
 
         // Cadence of the standing probe once logins have gone unanswered
-        // maxLoginAttempts times: slow enough to never trouble any attempt
-        // limiter, frequent enough that a recovered server is picked up in
-        // minutes without human help.
-        const restingRetryDelayMs = 5 * 60 * 1000;
+        // maxLoginAttempts times. Slow enough that it can never trouble a login
+        // limiter, fast enough that a server which was merely restarting is picked
+        // up within a minute rather than being left down for five.
+        const restingRetryDelayMs = 60 * 1000;
 
         const initialReconnectDelay = 1000;
         const maxReconnectDelay = 30000;
@@ -609,7 +659,16 @@ module.exports = function (RED) {
                 let parsed;
                 try {
                     parsed = JSON.parse(data.toString());
+                    if (exceedsMaxDepth(parsed, MAX_FRAME_DEPTH)) {
+                        // Deliberately thrown into the existing fallback: the raw
+                        // Buffer is flat, so forwarding it cannot make Node-RED's
+                        // recursive clone blow the stack. Letting the parsed value
+                        // through would kill the runtime the moment a Catch node is
+                        // wired or the output has a second wire.
+                        throw new Error(`frame nested deeper than ${MAX_FRAME_DEPTH} levels`);
+                    }
                 } catch (e) {
+                    node.warn(`Unusable WebIQ frame forwarded as raw data: ${e.message}`);
                     node.send({ payload: data });
                     return;
                 }
@@ -708,7 +767,7 @@ module.exports = function (RED) {
                     node.status({ fill: 'red', shape: 'ring', text: 'link stale - reconnecting' });
                 } else if (ctx.failureKind === 'login-timeout') {
                     node.status(loginTimeouts >= maxLoginAttempts
-                        ? { fill: 'red', shape: 'ring', text: 'login unanswered - retrying every 5m' }
+                        ? { fill: 'red', shape: 'ring', text: 'login unanswered - retrying every 60s' }
                         : { fill: 'red', shape: 'ring', text: 'login timeout' });
                 } else if (ctx.failureKind === 'auth-rejected') {
                     // A server that hangs up after rejecting must not erase the
@@ -907,9 +966,9 @@ module.exports = function (RED) {
                 // without human help.
                 const resting = loginTimeouts >= maxLoginAttempts;
                 node.status(resting
-                    ? { fill: 'red', shape: 'ring', text: 'login unanswered - retrying every 5m' }
+                    ? { fill: 'red', shape: 'ring', text: 'login unanswered - retrying every 60s' }
                     : { fill: 'red', shape: 'ring', text: 'login timeout' });
-                node.error(`No login reply received within ${loginTimeoutSeconds}s (unanswered login ${loginTimeouts}): the server may be unreachable or slow to answer, or the timeout may be too short for this project.${resting ? ' Falling back to one attempt every 5 minutes until the server answers.' : ''}`);
+                node.error(`No login reply received within ${loginTimeoutSeconds}s (unanswered login ${loginTimeouts}): the server may be unreachable or slow to answer, or the timeout may be too short for this project.${resting ? ' Falling back to one attempt every 60 seconds until the server answers.' : ''}`);
 
                 // terminate(), not close(): this peer just proved unresponsive, and
                 // close() would wait on ws's internal 30s timer for a close frame
@@ -921,14 +980,13 @@ module.exports = function (RED) {
         // +/-20% jitter, so a site with many gateways does not stampede a WebIQ
         // server the instant it comes back up.
         function withJitter(delay) {
-            // Clamp after jittering so a documented ceiling is a real ceiling - but
-            // clamp against the LARGER of the base delay and the transport ceiling,
-            // otherwise a deliberately slow cadence (the 5-minute resting probe)
-            // would be silently compressed to 30s.
-            return Math.min(
-                Math.round(delay * (0.8 + (Math.random() * 0.4))),
-                Math.max(delay, maxReconnectDelay)
-            );
+            // Jitter DOWNWARD only, 60-100% of the delay. Spreading upward and then
+            // clamping piled the whole upper half of the distribution onto the exact
+            // ceiling - so at the 30s cap, where a stampede is most likely, half the
+            // gateways would still have fired at precisely the same moment. This way
+            // a documented ceiling stays a real ceiling and the spread is preserved
+            // at every rung, including the top one.
+            return Math.round(delay * (0.6 + (Math.random() * 0.4)));
         }
 
         function scheduleReconnect(overrideDelayMs) {
@@ -973,7 +1031,14 @@ module.exports = function (RED) {
                 const liveSocket = !!(activeContext && activeContext.socket &&
                     (activeContext.socket.readyState === WebSocket.OPEN ||
                      activeContext.socket.readyState === WebSocket.CONNECTING));
-                const wantsAction = authLatched || !liveSocket;
+
+                // Only a fully AUTHENTICATED connection is healthy enough to ignore
+                // the verb. Treating a live-but-unauthenticated socket as healthy
+                // made the escape hatch a silent success no-op for the whole login
+                // window - which, with a long Login timeout, is exactly when an
+                // operator reaches for it. The 60s cooldown bounds the cost of
+                // interrupting a login that was about to succeed.
+                const wantsAction = authLatched || !liveSocket || !isAuthenticated();
 
                 // Rate-limited: an automated Catch -> reconnect loop would otherwise
                 // unlatch-and-retry on every message, turning this escape hatch into

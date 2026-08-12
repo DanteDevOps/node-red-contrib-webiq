@@ -30,7 +30,7 @@ npm install node-red-contrib-webiq
    - **Username** / **Password**: Your WebIQ project credentials. Stored in Node-RED's credential store, not in `flows.json`, and stripped from flow exports.
    - **Login timeout**: Seconds to wait for the server's login reply before reporting a timeout and reconnecting. Defaults to `5`, maximum `86400`. Raise this if the project is backed by a slow PLC — a login that takes longer than the timeout will otherwise loop without ever authenticating.
    - **Heartbeat**: Seconds between liveness probes once authenticated. Defaults to `30`; `0` disables; values between 0 and 1 are raised to 1 second. Without it, a connection that dies without a TCP close keeps reporting `authenticated` forever while every request disappears.
-   - **Login attempts**: How many consecutive *rejected* logins (default `5`, range 1–20) before the node latches and stops trying — WebIQ counts attempts server-side and can lock the account. A lockout reply latches immediately. Logins that go *unanswered* never latch: after the same count the node falls back to one probe every 5 minutes and recovers on its own.
+   - **Login attempts**: How many consecutive *rejected* logins (default `5`, range 1–20) before the node latches and stops trying — WebIQ counts attempts server-side and can lock the account. A lockout reply latches immediately. Logins that go *unanswered* never latch: after the same count the node falls back to one probe every 60 seconds and recovers on its own.
 3. Deploy the changes.
 
 ### API Request Node
@@ -155,7 +155,7 @@ The node's status badge names the problem. The most common ones:
 | `project missing` / `invalid project` | Project is empty, or contains `/`, `?`, `#` or `\`. | Use the project name or UUID only, not a URL or path. |
 | `connected - login pending` (stuck) | The socket opened but the server has not answered the login. | Usually a slow PLC. Raise **Login timeout**. |
 | `login timeout` | No login reply within the timeout. | Raise **Login timeout** — a slow PLC-backed project may need considerably longer. |
-| `login unanswered - retrying every 5m` | **Login attempts** logins in a row went unanswered. | The server is probably down or still booting. The node keeps probing every 5 minutes and recovers on its own the moment the server answers — no action needed unless the server should be up. |
+| `login unanswered - retrying every 60s` | **Login attempts** logins in a row went unanswered. | The server is probably down or still booting. The node keeps probing every 60 seconds and recovers on its own the moment the server answers — no action needed unless the server should be up. |
 | `login failed (n/N)` | The server rejected the login; *n* of the configured **Login attempts** are used. | Read the warning in the log — it carries WebIQ's own wording, which distinguishes a wrong password from a licence limit or a lockout. Fix the cause before the budget runs out. |
 | `login blocked - fix and redeploy` | The node has stopped trying: WebIQ reported a lockout, or **Login attempts** consecutive logins were rejected. | **Deliberate.** WebIQ counts login attempts and will lock the account — usually the same account your HMI clients use, so a typo here can take out operator screens. Fix the credentials and redeploy, or send `msg.webiq = "reconnect"` — it grants **one** fresh attempt, at most once per 60 s. |
 | `reconnecting on request` | A `msg.webiq = "reconnect"` control message was accepted. | Transient; the normal connection states follow. |
@@ -164,7 +164,7 @@ The node's status badge names the problem. The most common ones:
 | `subprotocol rejected` | The server did not accept `smarthmi-connect`. | Usually a reverse proxy stripping the `Sec-WebSocket-Protocol` header. |
 | `server rejected upgrade (HTTP nnn)` | The server refused the WebSocket handshake. | **A wrong Project name is the most likely cause** — the project is part of the connection URL, so an unknown project is refused here, before any login. Shown for **400, 401, 403, 404, 410**; retries every 30 s. Also check host, port and any reverse proxy. |
 | `server unavailable (HTTP nnn)` | The server or proxy is busy or broken, not misconfigured. | Everything else, including **429 and every 5xx**, retries on the normal fast ladder. Usually no action needed. |
-| `link stale - reconnecting` | Two heartbeats passed with no traffic and no pong. | Normal after a network drop — it reconnects automatically. Persistent flapping means the server does not answer pings *and* sends nothing between probes; raise **Heartbeat** rather than disabling it. |
+| `link stale - reconnecting` | Two probes went unanswered (detected on the third interval) with no traffic and no pong. | Normal after a network drop — it reconnects automatically. Persistent flapping means the server does not answer pings *and* sends nothing between probes; raise **Heartbeat** rather than disabling it. |
 | `send buffer full` | The server has stopped reading and 1 MB is queued. | Requests are being dropped rather than buffered forever. Check server load. |
 | `disconnected` | No connection; reconnecting with backoff (1 s doubling to 30 s). | Wait, or check the server. |
 

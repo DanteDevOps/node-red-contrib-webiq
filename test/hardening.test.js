@@ -256,3 +256,166 @@ test('a fractional heartbeat cannot become a ping storm', async (t) => {
         'the clamp must be reported'
     );
 });
+
+test('a deeply nested frame is not handed to Node-RED to clone', async (t) => {
+    // maxPayload bounds SIZE, not SHAPE. Node-RED clones a message recursively for
+    // every Catch node and every extra wire, so a 16 KB frame nested thousands deep
+    // used to throw RangeError inside the ws handler and kill the whole runtime.
+    const server = await createWebIQServer(({ request, socket }) => {
+        if (request.cmd === 'user.login') {
+            socket.send(JSON.stringify({ cmd: 'user.login', id: request.id, data: { loggedIn: true } }));
+            return;
+        }
+        const depth = 8000;
+        socket.send('{"cmd":"io.read","id":1,"error":{"message":"denied"},"data":' +
+            '['.repeat(depth) + '1' + ']'.repeat(depth) + '}');
+    });
+    t.after(() => server.close());
+
+    const runtime = createRuntime(registerWebIQConnect);
+    const node = createConnectionNode(runtime, server.port, { loginTimeout: 5, heartbeat: 0 });
+    t.after(() => stopConnectionNode(node));
+
+    await waitFor(() => node.statuses.some((s) => s.text === 'authenticated'), 'authenticated');
+    node.emit('input', { payload: { cmd: 'io.read', id: 5, data: ['A'] } }, undefined, () => {});
+
+    const forwarded = await waitFor(
+        () => node.sent.find((m) => Buffer.isBuffer(m.payload)),
+        'over-deep frame forwarded as a flat Buffer'
+    );
+
+    assert.ok(Buffer.isBuffer(forwarded.payload), 'must not forward the parsed object');
+    assert.ok(
+        node.warnings.some((w) => /nested deeper than/.test(String(w))),
+        'the rejection must be explained'
+    );
+
+    // A flat Buffer is safe for Node-RED to clone; the parsed value was not.
+    const { createRequire } = require('node:module');
+    const path = require('node:path');
+    const runtimeDir = process.env.WEBIQ_NODE_RED_TEST_RUNTIME;
+    if (runtimeDir) {
+        const util = createRequire(path.join(path.resolve(runtimeDir), 'package.json'))('@node-red/util');
+        assert.doesNotThrow(
+            () => util.util.cloneMessage(forwarded),
+            'what we forward must survive a real Node-RED deep clone'
+        );
+    }
+});
+
+test('a lockout is detected even when its wording runs long', async (t) => {
+    // Routing the match through the 200-character display sanitizer silently
+    // narrowed it: a verbose lockout reply stopped latching.
+    const preamble = 'Authentication against realm CORPORATE-NORTH via gateway GW-01-PRIMARY was refused by site security policy 4711 revision 12, because this account has exceeded the permitted number of consecutive unsuccessful authentication attempts within the configured observation window; ';
+    const message = preamble + 'too many login attempts, the account is locked for 15 minutes';
+    assert.ok(message.indexOf('too many login attempts') > 200, 'the trigger must fall past the display cap');
+
+    const server = await createWebIQServer(({ request, socket }) => {
+        if (request.cmd === 'user.login') {
+            // No errc: only the prose identifies this as a lockout.
+            socket.send(JSON.stringify({
+                cmd: 'user.login', id: request.id, data: null,
+                error: { category: 'shmi:connect:api:generic', message }
+            }));
+        }
+    });
+    t.after(() => server.close());
+
+    const runtime = createRuntime(registerWebIQConnect);
+    const node = createConnectionNode(runtime, server.port, { loginTimeout: 5, heartbeat: 0 });
+    t.after(() => stopConnectionNode(node));
+
+    await waitFor(
+        () => node.statuses.some((s) => s.text === 'login blocked - fix and redeploy'),
+        'a long-worded lockout must still latch immediately'
+    );
+    assert.equal(server.requests.length, 1, 'no second login after a lockout');
+});
+
+test('a string-shaped error still triggers lockout detection', async (t) => {
+    const server = await createWebIQServer(({ request, socket }) => {
+        if (request.cmd === 'user.login') {
+            socket.send(JSON.stringify({
+                cmd: 'user.login', id: request.id, data: null,
+                error: 'too many login attempts'
+            }));
+        }
+    });
+    t.after(() => server.close());
+
+    const runtime = createRuntime(registerWebIQConnect);
+    const node = createConnectionNode(runtime, server.port, { loginTimeout: 5, heartbeat: 0 });
+    t.after(() => stopConnectionNode(node));
+
+    await waitFor(
+        () => node.statuses.some((s) => s.text === 'login blocked - fix and redeploy'),
+        'string errors must not defeat lockout detection'
+    );
+});
+
+test('an internationalised hostname is still accepted', async (t) => {
+    const runtime = createRuntime(registerWebIQConnect);
+    const node = runtime.create('webiq-api-connect', {
+        host: 'wärmezähler.example',
+        port: '10123',
+        project: 'p',
+        heartbeat: 0,
+        credentials: { username: 'u', password: 'p' }
+    });
+    t.after(() => stopConnectionNode(node));
+
+    assert.equal(
+        node.statuses.some((s) => s.text === 'invalid host'),
+        false,
+        'IDN hosts worked before the validation existed and must keep working'
+    );
+});
+
+test('jitter never exceeds the delay and still spreads', async (t) => {
+    // Spreading upward and clamping piled half the distribution onto the exact
+    // ceiling - no spread where a stampede is most likely. Jitter is now
+    // downward-only: 60-100% of the base, so the ceiling stays real.
+    const observed = [];
+    const originalRandom = Math.random;
+    const realSetTimeout = global.setTimeout;
+
+    try {
+        for (const r of [0, 0.5, 1]) {
+            Math.random = () => r;
+            const captured = [];
+            global.setTimeout = (fn, ms) => {
+                captured.push(ms);
+                return realSetTimeout(fn, Math.min(ms, 5));
+            };
+
+            const runtime = createRuntime(registerWebIQConnect);
+            const node = runtime.create('webiq-api-connect', {
+                host: '127.0.0.1', port: '1', project: 'p', heartbeat: 0,
+                credentials: { username: 'u', password: 'p' }
+            });
+
+            // Port 1 refuses immediately; wait for the close to schedule a reconnect.
+            await new Promise((resolve) => realSetTimeout(resolve, 300));
+            global.setTimeout = realSetTimeout;
+            node.emit('close');
+
+            // The first transport failure schedules from a 1000ms base.
+            const reconnectDelay = captured.find((ms) => ms >= 500 && ms <= 1000);
+            assert.ok(
+                reconnectDelay !== undefined,
+                `no reconnect delay observed for random=${r} (saw ${captured.join(', ')})`
+            );
+            observed.push(reconnectDelay);
+        }
+    } finally {
+        Math.random = originalRandom;
+        global.setTimeout = realSetTimeout;
+    }
+
+    assert.ok(
+        Math.max(...observed) <= 1000,
+        `jitter must never exceed the base (saw ${Math.max(...observed)})`
+    );
+    assert.ok(Math.min(...observed) < Math.max(...observed), 'jitter must spread, not collapse to one value');
+    assert.ok(Math.min(...observed) >= 600, 'jitter must not go below 60% of the base');
+});

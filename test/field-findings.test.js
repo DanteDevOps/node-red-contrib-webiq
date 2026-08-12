@@ -280,7 +280,7 @@ test('unanswered logins never latch: after the budget the node rests and recover
     t.after(() => stopConnectionNode(node));
 
     await waitFor(
-        () => node.statuses.some((s) => s.text === 'login unanswered - retrying every 5m'),
+        () => node.statuses.some((s) => s.text === 'login unanswered - retrying every 60s'),
         'resting badge'
     );
 

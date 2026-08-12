@@ -194,8 +194,8 @@
         <dt>Heartbeat <span class="property-type">number</span></dt>
         <dd>Seconds between liveness probes, sent only once the connection is
             authenticated. Defaults to <code>30</code>; <code>0</code> disables it.
-            The link is terminated and reconnected after two consecutive intervals with
-            no pong <i>and</i> no other inbound traffic, so a server that is streaming
+            The link is terminated and reconnected once two consecutive probes have gone
+            unanswered - the third interval - with no pong <i>and</i> no other inbound traffic, so a server that is streaming
             data but ignores pings is never treated as dead. Without a heartbeat, a
             connection that drops without a TCP close stays <code>authenticated</code>
             indefinitely and never reconnects.</dd>
@@ -207,7 +207,7 @@
             counts login attempts server-side and can lock the account, and a reply of
             "too many login attempts" latches immediately. Logins that go
             <i>unanswered</i> never latch - after the same count the node falls back to
-            one probe every 5 minutes and recovers on its own when the server answers,
+            one probe every 60 seconds and recovers on its own when the server answers,
             so a server that is slow to boot cannot permanently strand the node.</dd>
     </dl>
 
