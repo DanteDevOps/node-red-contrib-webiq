@@ -143,7 +143,11 @@ test('the configured login timeout closes a connection that never replies', asyn
     );
 
     assert.match(String(timeoutError.error), /within 0\.05s/);
+    // The badge no longer says "/ project not found". A login that goes unanswered
+    // says nothing about the project - the project is a URL path segment, so a wrong
+    // one is refused at the HTTP upgrade long before a login is ever sent. Blaming it
+    // here sent users to check a field that was never involved.
     assert.ok(
-        node.statuses.some((status) => status.text === 'login timeout / project not found')
+        node.statuses.some((status) => status.text === 'login timeout')
     );
 });

@@ -32,6 +32,37 @@ module.exports = function (RED) {
     // is retried on the normal ladder.
     const PERMANENT_UPGRADE_CODES = [400, 401, 403, 404, 410];
 
+    // WebIQ rejects logins with { category, errc, message } - there is no numeric
+    // HTTP-style code. Observed in the field: category 'shmi:connect:api:user'
+    // with errc 8 and the message 'too many login attempts', i.e. the server's own
+    // attempt limiter has tripped. Every further attempt keeps that window open, so
+    // this must stop the node dead rather than back off.
+    const LOCKOUT_ERRC = 8;
+    const LOCKOUT_PATTERN = /too many login attempts|locked|blocked/i;
+
+    // Total consecutive failed logins - rejections AND timeouts, across sockets -
+    // before the node gives up entirely. Counted node-wide on purpose: a per-socket
+    // counter resets every time the server hangs up, so the ladder never climbs and
+    // the node can burn login attempts indefinitely against an account that other
+    // WebIQ clients (the HMI itself) also depend on.
+    const MAX_LOGIN_ATTEMPTS = 5;
+
+    function describeServerError(error) {
+        if (!error) { return 'unknown error'; }
+        const parts = [];
+        if (error.category) { parts.push(error.category); }
+        if (error.errc !== undefined) { parts.push('errc ' + error.errc); }
+        if (error.code !== undefined) { parts.push('code ' + error.code); }
+        const prefix = parts.length ? `[${parts.join(' ')}] ` : '';
+        return prefix + (error.message || 'no message');
+    }
+
+    function isLockout(error) {
+        if (!error) { return false; }
+        if (error.errc === LOCKOUT_ERRC && /user/.test(String(error.category || ''))) { return true; }
+        return LOCKOUT_PATTERN.test(String(error.message || ''));
+    }
+
     function WebIQNode(config) {
         RED.nodes.createNode(this, config);
         const node = this;
@@ -95,6 +126,16 @@ module.exports = function (RED) {
             ? Math.min(configuredHeartbeat, maxHeartbeatSeconds)
             : defaultHeartbeatSeconds;
         const heartbeatMs = heartbeatSeconds * 1000;
+
+        if (heartbeatIsValid && configuredHeartbeat > maxHeartbeatSeconds) {
+            node.warn(`Heartbeat of ${configuredHeartbeat}s exceeds the ${maxHeartbeatSeconds}s maximum; using ${maxHeartbeatSeconds}s.`);
+        }
+
+        if (heartbeatMs <= 0) {
+            // Disabling the heartbeat restores exactly the 1.x failure this release
+            // exists to fix, so it must not be a silent choice.
+            node.warn('WebIQ heartbeat is disabled. A connection that dies without a TCP close will not be detected, and this node will keep reporting "authenticated" while requests are lost.');
+        }
 
         // Terminate only after this many consecutive silent intervals. A threshold of
         // one would make a single dropped frame - or a server that is briefly busy -
@@ -214,6 +255,12 @@ module.exports = function (RED) {
         let reconnectDelay = 1000;
         let closing = false;
 
+        // Login budget and terminal latch. Both are node-scoped so they survive the
+        // socket churn that a rejecting server causes.
+        let loginAttemptsUsed = 0;
+        let authLatched = false;
+        let authLatchReason = null;
+
         const initialReconnectDelay = 1000;
         const maxReconnectDelay = 30000;
 
@@ -299,6 +346,35 @@ module.exports = function (RED) {
             return !!activeContext && activeContext.state === STATE.AUTHENTICATED;
         }
 
+        // Stop trying, permanently, until the user intervenes. Retrying a rejected
+        // credential is not harmless here: WebIQ counts attempts and locks the
+        // account, and that account is very likely the one the operator HMI uses
+        // too - so a typo in one Node-RED node can take out the real screens.
+        function latchAuthFailure(reason) {
+            authLatched = true;
+            authLatchReason = reason;
+
+            if (reconnectTimer) {
+                clearTimeout(reconnectTimer);
+                reconnectTimer = null;
+            }
+
+            const ctx = activeContext;
+            if (ctx) {
+                clearTimers(ctx);
+                try { ctx.socket.close(); } catch (_) {}
+            }
+
+            node.status({ fill: 'red', shape: 'ring', text: 'login blocked - fix and redeploy' });
+            node.error(`WebIQ login abandoned: ${reason}. No further login attempts will be made. Correct the credentials and redeploy, or send a message with msg.webiq = "reconnect" to retry once.`);
+        }
+
+        function clearAuthLatch() {
+            authLatched = false;
+            authLatchReason = null;
+            loginAttemptsUsed = 0;
+        }
+
         // Any traffic at all proves the link is alive, not just a pong. A WebIQ
         // server that is streaming data but does not answer pings must not be
         // terminated as dead.
@@ -349,7 +425,7 @@ module.exports = function (RED) {
         }
 
         function connect() {
-            if (closing) { return; }
+            if (closing || authLatched) { return; }
 
             let socket;
             try {
@@ -408,7 +484,24 @@ module.exports = function (RED) {
                 }
 
                 handleLoginResponse(ctx, parsed);
-                node.send({ payload: parsed });
+
+                const out = { payload: parsed };
+
+                // A server frame carrying an error is still forwarded - nothing is
+                // hidden - but it is ALSO raised as a node error so a Catch node can
+                // act on it. Without this, an io.write that WebIQ refused (unknown
+                // tag, read-only item, insufficient rights, PLC offline) arrives on
+                // the same wire looking exactly like a confirmed write, and a flow
+                // that treats an emitted message as success reports a setpoint that
+                // was never applied.
+                if (parsed && parsed.error && parsed.cmd !== 'user.login') {
+                    node.error(
+                        new Error(`WebIQ rejected ${parsed.cmd || 'request'}: ${describeServerError(parsed.error)}`),
+                        out
+                    );
+                }
+
+                node.send(out);
             };
 
             ctx.handlers.error = function (err) {
@@ -431,7 +524,11 @@ module.exports = function (RED) {
 
                     if (ctx.upgradePermanent) {
                         node.status({ fill: 'red', shape: 'ring', text: `server rejected upgrade (HTTP ${code})` });
-                        node.error(`WebIQ server rejected the WebSocket upgrade with HTTP ${code}: check the project name and the connection URL.`);
+                        // The project is a URL path segment, so a wrong project is
+                        // rejected here at the handshake - it never reaches a login.
+                        // Name the configured project so the user checks the field
+                        // that is actually most often at fault.
+                        node.error(`WebIQ server rejected the WebSocket upgrade with HTTP ${code}. The project "${project}" is the most likely cause - it is part of the connection URL, so an unknown project is refused before any login happens. Also check host, port and any reverse proxy.`);
                     } else {
                         node.status({ fill: 'yellow', shape: 'ring', text: `server unavailable (HTTP ${code})` });
                         node.warn(`WebIQ server or proxy returned HTTP ${code} to the WebSocket upgrade; retrying.`);
@@ -439,6 +536,10 @@ module.exports = function (RED) {
                     return;
                 }
 
+                // Keep the cause so the close handler can name it instead of
+                // guessing. ws reports the real reason here and then closes with
+                // nothing useful attached.
+                ctx.transportError = { code: String(err.code || ''), message: String(err.message || '') };
                 node.warn(`WebSocket error: ${err.message}`);
             };
 
@@ -450,26 +551,57 @@ module.exports = function (RED) {
 
                 if (closing) { return; }
 
+                // The latch already painted its own badge and cancelled everything.
+                if (authLatched) { return; }
+
+                // Preserve the badge whichever path we arrived by. These used to be
+                // repainted to a generic 'disconnected' within milliseconds, so
+                // states the documentation described were never actually observable.
                 if (ctx.failureKind === 'project-not-found') {
-                    // Status and error were already reported when the 404 arrived;
-                    // don't overwrite the more specific badge with a generic one.
                     node.status({ fill: 'red', shape: 'ring', text: 'project not found' });
+                } else if (ctx.failureKind === 'heartbeat-timeout') {
+                    node.status({ fill: 'red', shape: 'ring', text: 'link stale - reconnecting' });
+                } else if (ctx.failureKind === 'login-timeout') {
+                    node.status({ fill: 'red', shape: 'ring', text: 'login timeout' });
                 } else if (String(ctx.failureKind).startsWith('http-upgrade-')) {
-                    // Ditto for an upgrade rejection - the error handler already
-                    // reported it with the right severity for the status code.
+                    // The error handler already reported it with the right severity.
                 } else if (!ctx.loginAttempted) {
-                    node.status({ fill: 'red', shape: 'ring', text: 'project not found / connection failed' });
-                    node.error('WebIQ project may be invalid or server unreachable.');
+                    // Nothing was ever sent, so this is a transport fault. Name it
+                    // from the socket error rather than blaming the project, which
+                    // sent users to check a field that was never involved.
+                    const cause = ctx.transportError || {};
+                    let text = 'connection failed';
+                    let detail = 'the WebIQ server could not be reached.';
+
+                    if (/ECONNREFUSED/.test(cause.code)) {
+                        text = 'connection refused';
+                        detail = 'nothing is listening on that host and port.';
+                    } else if (/ENOTFOUND|EAI_AGAIN/.test(cause.code)) {
+                        text = 'host not found';
+                        detail = 'the host name could not be resolved.';
+                    } else if (/ETIMEDOUT|EHOSTUNREACH|ENETUNREACH/.test(cause.code)) {
+                        text = 'server unreachable';
+                        detail = 'the host did not respond - check the network path and any firewall.';
+                    } else if (/CERT|SELF_SIGNED|DEPTH_ZERO/.test(cause.code)) {
+                        text = 'TLS certificate rejected';
+                        detail = 'the server certificate was not trusted - check the tls-config node.';
+                    } else if (/subprotocol/i.test(cause.message)) {
+                        text = 'subprotocol rejected';
+                        detail = "the server did not accept the 'smarthmi-connect' subprotocol - a reverse proxy may be stripping it.";
+                    }
+
+                    node.status({ fill: 'red', shape: 'ring', text: text });
+                    node.error(`WebIQ connection failed: ${detail}${cause.message ? ' (' + cause.message + ')' : ''}`);
                 } else {
                     node.status({ fill: 'red', shape: 'ring', text: 'disconnected' });
                 }
 
                 setState(ctx, STATE.RECONNECT_WAIT);
 
-                // Both a WebIQ 404 and an HTTP upgrade rejection mean the endpoint is
-                // misconfigured, not momentarily unavailable. Hammering it on the fast
-                // ladder just pounds a route that cannot start working on its own.
+                // A misconfigured endpoint cannot start working on its own, so
+                // hammering it on the fast ladder only generates noise.
                 const misconfigured = ctx.failureKind === 'project-not-found' ||
+                    ctx.failureKind === 'login-timeout' ||
                     ctx.upgradePermanent === true;
                 scheduleReconnect(misconfigured ? slowRetryDelay : undefined);
             };
@@ -500,10 +632,14 @@ module.exports = function (RED) {
                 ctx.authenticatedAt = Date.now();
                 ctx.failureKind = null;
                 ctx.authFailures = 0;
+                loginAttemptsUsed = 0;
                 if (ctx.timers.authRetry) {
                     clearTimeout(ctx.timers.authRetry);
                     ctx.timers.authRetry = null;
                 }
+                // Deliberately a stable, exact string: Status nodes and tests match
+                // on it. A disabled heartbeat is surfaced by the deploy-time warning
+                // instead of by mutating this badge.
                 setState(ctx, STATE.AUTHENTICATED, { fill: 'green', shape: 'dot', text: 'authenticated' });
 
                 // Start liveness probing only once the session is usable. Pinging
@@ -537,17 +673,36 @@ module.exports = function (RED) {
 
             ctx.failureKind = 'auth-rejected';
             ctx.authFailures += 1;
+            loginAttemptsUsed += 1;
+
+            const described = describeServerError(message.error);
+
+            // The server telling us to stop must never be answered with another
+            // attempt - that is precisely what keeps a sliding lockout window open.
+            if (isLockout(message.error)) {
+                latchAuthFailure(`the server refused the login: ${described}`);
+                return;
+            }
+
+            if (loginAttemptsUsed >= MAX_LOGIN_ATTEMPTS) {
+                latchAuthFailure(`${loginAttemptsUsed} consecutive failed logins (last: ${described})`);
+                return;
+            }
+
             const authRetryDelay = Math.min(
                 initialAuthRetryDelay * Math.pow(2, ctx.authFailures - 1),
                 maxAuthRetryDelay
             );
 
-            setState(ctx, STATE.AUTH_RETRY_WAIT, { fill: 'yellow', shape: 'ring', text: 'connected - login failed' });
-            // Warn on the transition only; the retry itself is silent so a bad
-            // password cannot flood the log indefinitely.
-            if (ctx.authFailures === 1) {
-                node.warn(`WebIQ login failed, retrying (backing off up to ${maxAuthRetryDelay / 1000}s).`);
-            }
+            setState(ctx, STATE.AUTH_RETRY_WAIT, {
+                fill: 'yellow',
+                shape: 'ring',
+                text: `login failed (${loginAttemptsUsed}/${MAX_LOGIN_ATTEMPTS})`
+            });
+            // Always relay the server's own words: it is the only thing that
+            // distinguishes a wrong password from a licence limit or a lockout, and
+            // discarding it sends the user to check the wrong thing.
+            node.warn(`WebIQ login rejected ${described} - attempt ${loginAttemptsUsed} of ${MAX_LOGIN_ATTEMPTS}, retrying in ${authRetryDelay / 1000}s.`);
 
             if (ctx.timers.authRetry) { clearTimeout(ctx.timers.authRetry); }
             ctx.timers.authRetry = setTimeout(function () {
@@ -579,8 +734,21 @@ module.exports = function (RED) {
                 if (ctx.state === STATE.AUTHENTICATED) { return; }
 
                 ctx.failureKind = 'login-timeout';
-                node.status({ fill: 'red', shape: 'ring', text: 'login timeout / project not found' });
-                node.error(`No login reply received within ${loginTimeoutSeconds}s: project may be invalid, server unreachable, or the timeout is too short for this project.`);
+
+                // A login the server never answered may still have been counted by
+                // its attempt limiter, so it spends the same budget as a rejection.
+                // Without this, a slow project reconnects on the fast transport
+                // ladder and issues thousands of logins a day with no typo involved.
+                loginAttemptsUsed += 1;
+
+                node.status({ fill: 'red', shape: 'ring', text: 'login timeout' });
+                node.error(`No login reply received within ${loginTimeoutSeconds}s (attempt ${loginAttemptsUsed} of ${MAX_LOGIN_ATTEMPTS}): the server may be unreachable or slow to answer, or the timeout may be too short for this project.`);
+
+                if (loginAttemptsUsed >= MAX_LOGIN_ATTEMPTS) {
+                    latchAuthFailure(`${loginAttemptsUsed} consecutive logins went unanswered`);
+                    return;
+                }
+
                 try { socket.close(); } catch (_) {}
             }, loginTimeoutMs);
         }
@@ -597,7 +765,7 @@ module.exports = function (RED) {
         }
 
         function scheduleReconnect(overrideDelayMs) {
-            if (reconnectTimer || closing) { return; }
+            if (reconnectTimer || closing || authLatched) { return; }
 
             const base = typeof overrideDelayMs === 'number' ? overrideDelayMs : reconnectDelay;
 
@@ -620,6 +788,24 @@ module.exports = function (RED) {
             // no done() - it simply vanished.
             if (configError) {
                 done(new Error(`WebIQ node is not configured: ${configError}`));
+                return;
+            }
+
+            // Escape hatch from the terminal latch that does not need a redeploy -
+            // an unattended site can be recovered by a flow once the cause is fixed.
+            if (msg && msg.webiq === 'reconnect') {
+                const wasLatched = authLatched;
+                clearAuthLatch();
+                if (wasLatched || !activeContext) {
+                    node.status({ fill: 'grey', shape: 'ring', text: 'reconnecting on request' });
+                    connect();
+                }
+                done();
+                return;
+            }
+
+            if (authLatched) {
+                done(new Error(`WebIQ login is blocked: ${authLatchReason}. Fix the credentials and redeploy, or send msg.webiq = "reconnect" to retry.`));
                 return;
             }
 

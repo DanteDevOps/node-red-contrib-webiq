@@ -134,12 +134,16 @@ The node's status badge names the problem. The most common ones:
 | `invalid port` | Port is not an integer in 1–65535. | In 1.x an empty port silently dialled port 80 and reported it as a project failure. Set the real port, usually `10123`. |
 | `project missing` / `invalid project` | Project is empty, or contains `/`, `?`, `#` or `\`. | Use the project name or UUID only, not a URL or path. |
 | `connected - login pending` (stuck) | The socket opened but the server has not answered the login. | Usually a slow PLC. Raise **Login timeout**. |
-| `login timeout / project not found` | No login reply within the timeout. | Raise **Login timeout**; if it persists, check the project name and that the project is actually running. |
-| `connected - login failed` | The server rejected the credentials. | Check username and password. Retries back off to 60 s, so you will not lock the account out — but nothing will work until they are right. |
+| `login timeout` | No login reply within the timeout. | Raise **Login timeout** — a slow PLC-backed project may need considerably longer. Each timeout counts against the 5-attempt budget, because the server may have counted it too. |
+| `login failed (n/5)` | The server rejected the login. The badge shows how many of the 5 permitted attempts have been used. | Read the warning in the log — it carries WebIQ's own wording, which distinguishes a wrong password from a licence limit or a lockout. Fix the cause before the budget runs out. |
+| `login blocked - fix and redeploy` | The node has stopped trying, either because WebIQ reported a lockout or because 5 consecutive logins failed. | **Deliberate.** WebIQ counts login attempts and will lock the account — usually the same account your HMI clients use, so a typo here can take out operator screens. Correct the credentials and redeploy, or send `msg.webiq = "reconnect"` to retry once without redeploying. |
+| `connection refused` / `host not found` / `server unreachable` | Transport failure before any login was sent. | Check host, port, network path and firewall. Earlier versions reported all of these as `project not found`, which pointed at the wrong field. |
+| `TLS certificate rejected` | The server certificate was not trusted. | Check the `tls-config` node's CA settings. |
+| `subprotocol rejected` | The server did not accept `smarthmi-connect`. | Usually a reverse proxy stripping the `Sec-WebSocket-Protocol` header. |
 | `project not found` | The server replied with a 404. | The project name or UUID is wrong, or the project is not loaded yet. Retries every 30 s. |
 | `server rejected upgrade (HTTP nnn)` | The server never accepted the WebSocket at all. | Different from the above: check host, port and any reverse proxy in front of WebIQ. Shown for **400, 401, 403, 404, 410** — these cannot fix themselves, so they retry every 30 s. |
 | `server unavailable (HTTP nnn)` | The server or proxy is busy or broken, not misconfigured. | Everything else, including **429 and every 5xx**, retries on the normal fast ladder. Usually no action needed. |
-| `project not found / connection failed` | The socket closed before a login was attempted. | Server unreachable, wrong port, or a firewall in the way. |
+
 | `link stale - reconnecting` | Two heartbeats passed with no traffic and no pong. | Normal after a network drop — it reconnects automatically. Persistent flapping means the server does not answer pings; consider raising **Heartbeat** or setting it to `0`. |
 | `send buffer full` | The server has stopped reading and 1 MB is queued. | Requests are being dropped rather than buffered forever. Check server load. |
 | `disconnected` | No connection; reconnecting with backoff (1 s doubling to 30 s). | Wait, or check the server. |
