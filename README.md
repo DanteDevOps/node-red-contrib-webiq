@@ -106,6 +106,24 @@ After upgrading, for each **WebIQ API Connect** node:
 included in a backup.** It has been readable in plaintext for its entire life, and
 moving it into the credential store does not undo that.
 
+### Step 1b — API Request nodes from 1.0.x need rebuilding
+
+Very old (1.0.x) **API Request** nodes stored `cmd`, `id`, `data` and `interval`
+as separate fields. That layout was dropped in 1.1 and is not supported: such a
+node shows `needs migration` and explains what to do. Open it and put the whole
+request into the **Data** field as JSON:
+
+```json
+{ "cmd": "io.read", "id": 1, "data": ["DSin", "SInt"] }
+```
+
+The old `interval` field polled automatically. There is no built-in polling —
+drive the node from an **Inject** node set to repeat instead.
+
+Give each API Request node a **distinct, non-zero `id`**. Replies all arrive on
+the connection node's single output, and `id: 0` is reserved for the
+connection's own login — a node using it warns on deploy.
+
 ### Step 2 — expect Catch nodes to start firing (behaviour change)
 
 In 1.x, failures from these nodes never reached a **Catch** node — the message was

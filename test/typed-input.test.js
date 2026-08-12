@@ -161,3 +161,40 @@ test('a flow-context template is cloned, so downstream mutation cannot corrupt t
     assert.deepEqual(node.sent[1].payload.data, ['Tag'], 'second message must be unaffected');
     assert.deepEqual(stored.data, ['Tag'], 'the stored context object itself must be untouched');
 });
+
+test('a pre-1.1 node is told it needs migration, not that its JSON is invalid', async () => {
+    const runtime = createRuntime(registerApiRequest);
+    // How 1.0.x stored it: separate fields, data holding only the request data.
+    const node = runtime.create('api-request', {
+        cmd: 'io.read',
+        id: 0,
+        data: '["DSin", "SInt"]',
+        interval: 0
+    });
+
+    assert.deepEqual(node.statuses[0], { fill: 'red', shape: 'ring', text: 'needs migration' });
+
+    const err = await drive(node, {});
+    assert.ok(err instanceof Error);
+    assert.match(String(err), /pre-1\.1 layout/);
+    assert.match(String(err), /interval/, 'the removed polling behaviour must be called out');
+    assert.equal(node.sent.length, 0);
+});
+
+test('a request using the reserved id 0 warns but still works', async () => {
+    const runtime = createRuntime(registerApiRequest);
+    const node = runtime.create('api-request', {
+        data: '{"cmd":"io.read","id":0,"data":["A"]}'
+    });
+
+    assert.ok(
+        node.warnings.some((w) => /reserves for its own login/.test(String(w))),
+        'id 0 must be called out'
+    );
+
+    // Deliberately not rejected: 1.1.x shipped 0 as the default, and refusing it
+    // would break flows that work today.
+    const err = await drive(node, {});
+    assert.equal(err, undefined);
+    assert.equal(node.sent.length, 1);
+});

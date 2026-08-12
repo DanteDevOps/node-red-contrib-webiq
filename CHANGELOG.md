@@ -72,6 +72,10 @@ A further independent review, reproduced in full before fixing. Two of these wer
 - **A reconnect triggered synchronously from a status update left a stale timer.** `node.status()` can re-enter the node: a Status → Change → `msg.webiq="reconnect"` flow establishes a replacement connection from inside the close handler's own status call, and the close handler then carried on and armed a timer that later tore down the healthy replacement. Reconnects are no longer scheduled while a connection exists.
 - **A fractional heartbeat became a ping storm.** `heartbeat: 0.001` was honoured literally — roughly 178 pings in 250 ms. Positive intervals below 1 second are now raised to 1 second with a warning; `0` still disables. A non-integer **Login attempts** value is likewise warned about rather than silently floored.
 
+### Changed — API Request migration diagnostics
+- **A 1.0.x API Request node now says it needs migrating.** Nodes from before 1.1 stored `cmd`, `id`, `data` and `interval` as separate properties, with `data` holding only the request payload rather than a whole request. Reading one of those as modern full-request JSON produced a baffling "not a valid WebIQ request" error. Such a node now shows `needs migration` and explains exactly what to put in the Data field. It is deliberately **not** auto-converted: the old `interval` meant "poll every n seconds", which this node does not do, so a silent conversion would quietly stop a flow polling.
+- **A request using `id: 0` warns.** That id is reserved for the connection node's own login, so a flow correlating replies by id alone cannot tell an `io.read` answer from a login reply after a reconnect. It is a warning rather than a rejection because 1.1.x shipped `0` as the default and refusing it would break flows that work today.
+
 ### Fixed — third audit round (fresh eyes over the lockout work)
 A full re-audit of the lockout/latch commit — itself unreviewed until then — confirmed four defects in it and several sharp edges. All fixed:
 

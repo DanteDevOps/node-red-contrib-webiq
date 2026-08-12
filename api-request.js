@@ -21,13 +21,29 @@ module.exports = function (RED) {
         const dataType = config.dataType || 'json';
         const isStatic = dataType === 'json';
 
+        // The 1.0.x node stored cmd / id / data / interval as separate properties and
+        // its data field held only the request DATA, not a whole request. Reading that
+        // as a modern full-request JSON produces a baffling "not a valid WebIQ
+        // request" error, so name the real problem instead. Not auto-migrated on
+        // purpose: `interval` meant "poll every n seconds", which this node does not
+        // do, so a silent conversion would quietly stop a flow from polling.
+        const isLegacySchema = config.cmd !== undefined || config.interval !== undefined;
+
         // A static payload is parsed once, at construction: it cannot change between
         // messages, so re-parsing it only buys the chance to report the same fault
         // repeatedly, and a bad value should show on the canvas at deploy time.
         let template = null;
         let templateError = null;
 
-        if (isStatic) {
+        if (isLegacySchema) {
+            templateError = new Error(
+                'This API Request node uses the pre-1.1 layout (separate cmd/id/data' +
+                (config.interval !== undefined ? '/interval' : '') +
+                ' fields), which is no longer supported. Open the node and put the whole request into the Data field as JSON, for example ' +
+                '{"cmd":"io.read","id":1,"data":["Tag"]}' +
+                (config.interval !== undefined ? '. The old "interval" polling is not built in; drive the node from an Inject node set to repeat instead.' : '.')
+            );
+        } else if (isStatic) {
             try {
                 template = JSON.parse(config.data || "{}");
             } catch (err) {
@@ -40,10 +56,19 @@ module.exports = function (RED) {
                     templateError = new Error(`Data field is not a valid WebIQ request: ${problem}.`);
                 }
             }
+
+            // id 0 is reserved for the connection node's own login. A request using it
+            // still works, but a flow correlating replies by id alone cannot tell an
+            // io.read answer from a login reply after a reconnect. 1.1.x shipped 0 as
+            // the default, so warn rather than reject - refusing would break flows
+            // that are working today.
+            if (!templateError && template && template.id === 0) {
+                node.warn('This request uses id 0, which the connection node reserves for its own login. Give each API Request node a distinct non-zero id so replies can be told apart.');
+            }
         }
 
         node.status(templateError
-            ? { fill: "red", shape: "ring", text: "invalid request" }
+            ? { fill: "red", shape: "ring", text: isLegacySchema ? "needs migration" : "invalid request" }
             : { fill: "blue", shape: "dot", text: "ready" });
 
         function clone(value) {
