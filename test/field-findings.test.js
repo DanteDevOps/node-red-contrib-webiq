@@ -49,12 +49,16 @@ test('a lockout reply stops the node dead instead of retrying into it', async (t
     );
 });
 
-test('repeated rejections latch even when the server hangs up each time', async (t) => {
-    // This is the case a per-socket counter could never catch: the server closes
-    // after rejecting, so a context-scoped tally resets on every reconnect and the
-    // node retries for ever.
+test('repeated rejections latch and PACE even when the server hangs up each time', async (t) => {
+    // The case a per-socket counter can never catch: the server closes after each
+    // rejection, so a context-scoped tally would reset on every reconnect. The
+    // pacing assertion matters as much as the cap - without the node-scoped ladder,
+    // all attempts fire seconds apart, the burst most likely to trip the server's
+    // own attempt limiter.
+    const stamps = [];
     const server = await createWebIQServer(({ request, socket }) => {
         if (request.cmd === 'user.login') {
+            stamps.push(Date.now());
             socket.send(JSON.stringify({ cmd: 'user.login', id: request.id, data: null, error: REJECTED }));
             setTimeout(() => { try { socket.close(); } catch (_) {} }, 10);
         }
@@ -62,17 +66,24 @@ test('repeated rejections latch even when the server hangs up each time', async 
     t.after(() => server.close());
 
     const runtime = createRuntime(registerWebIQConnect);
-    const node = createConnectionNode(runtime, server.port, { loginTimeout: 5, heartbeat: 0 });
+    const node = createConnectionNode(runtime, server.port, {
+        loginTimeout: 5,
+        heartbeat: 0,
+        loginAttempts: 2
+    });
     t.after(() => stopConnectionNode(node));
 
     await waitFor(
         () => node.statuses.some((s) => s.text === 'login blocked - fix and redeploy'),
         'auth latch after repeated rejections',
-        30000
+        15000
     );
 
-    const attempts = server.requests.filter((r) => r.cmd === 'user.login').length;
-    assert.ok(attempts <= 5, `expected the budget to cap attempts, saw ${attempts}`);
+    assert.equal(stamps.length, 2, 'the configured budget must cap the attempts');
+    assert.ok(
+        stamps[1] - stamps[0] >= 3500,
+        `retry must climb the auth ladder, not the fast transport ladder (gap was ${stamps[1] - stamps[0]}ms)`
+    );
 
     const before = server.requests.length;
     await new Promise((resolve) => setTimeout(resolve, 2500));
@@ -207,4 +218,161 @@ test('disabling the heartbeat warns, because it restores the 1.x failure mode', 
         node.warnings.some((w) => /heartbeat is disabled/i.test(String(w))),
         'a disabled heartbeat must be visible without opening the node'
     );
+});
+
+test('a reconnect command during reconnect-wait must not leak a second socket', async (t) => {
+    // B1 from the second audit: connect() used to leave a pending reconnectTimer
+    // armed, which later fired a second connect() and orphaned the first socket -
+    // open, authenticated, and unreachable by every owns()-guarded handler.
+    const seen = new Set();
+    const server = await createWebIQServer(loginResponder(null));
+    const tracker = setInterval(() => {
+        for (const c of server.clients) { seen.add(c); }
+    }, 10);
+    t.after(() => clearInterval(tracker));
+    t.after(() => server.close());
+
+    const runtime = createRuntime(registerWebIQConnect);
+    const node = createConnectionNode(runtime, server.port, { loginTimeout: 5, heartbeat: 0 });
+    t.after(() => stopConnectionNode(node));
+
+    await waitFor(() => node.statuses.some((s) => s.text === 'authenticated'), 'first auth');
+
+    // Server drops the connection; the node schedules a reconnect (~1s).
+    for (const c of server.clients) { c.terminate(); }
+    await waitFor(() => [...server.clients].length === 0, 'server-side drop');
+
+    // Nudge it immediately - this used to race the still-armed timer.
+    node.emit('input', { webiq: 'reconnect' }, undefined, () => {});
+
+    await waitFor(
+        () => node.statuses.filter((s) => s.text === 'authenticated').length >= 2,
+        'reauthenticated after nudge'
+    );
+
+    // Wait well past the forgotten timer's horizon, then count.
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+
+    const open = [...server.clients].filter((c) => c.readyState === c.OPEN).length;
+    assert.equal(open, 1, 'exactly one live connection - no orphaned socket');
+    assert.ok(seen.size <= 2, `no third connect from a forgotten timer (saw ${seen.size})`);
+});
+
+test('unanswered logins never latch: after the budget the node rests and recovers', async (t) => {
+    // Q1 resolution: silence means the server is down or booting - it is not
+    // counting login attempts, so stranding an unattended gateway terminally over
+    // it would be an availability regression. It must rest, then self-recover.
+    let answer = false;
+    const server = await createWebIQServer(({ request, socket }) => {
+        if (request.cmd === 'user.login' && answer) {
+            socket.send(JSON.stringify({ cmd: 'user.login', id: request.id, data: { loggedIn: true } }));
+        }
+        // otherwise: accept the connection, never answer the login
+    });
+    t.after(() => server.close());
+
+    const runtime = createRuntime(registerWebIQConnect);
+    const node = createConnectionNode(runtime, server.port, {
+        loginTimeout: 0.05,
+        heartbeat: 0,
+        loginAttempts: 1
+    });
+    t.after(() => stopConnectionNode(node));
+
+    await waitFor(
+        () => node.statuses.some((s) => s.text === 'login unanswered - retrying every 5m'),
+        'resting badge'
+    );
+
+    // Resting is NOT the latch: messages fail as disconnected, not as blocked.
+    const err = await new Promise((resolve) => {
+        node.emit('input', { payload: { cmd: 'io.read', id: 2, data: [] } }, undefined, resolve);
+    });
+    assert.ok(err instanceof Error);
+    assert.doesNotMatch(String(err), /login is blocked/, 'resting must not report the terminal latch');
+
+    // Server recovers; a nudge (or the 5-minute probe) brings the node back.
+    answer = true;
+    node.emit('input', { webiq: 'reconnect' }, undefined, () => {});
+    await waitFor(() => node.statuses.some((s) => s.text === 'authenticated'), 'self-recovery');
+});
+
+test('the reconnect escape hatch is rate-limited and grants exactly one attempt', async (t) => {
+    // Q2 resolution: without this, a Catch -> reconnect loop defeats the latch.
+    const server = await createWebIQServer(({ request, socket }) => {
+        if (request.cmd === 'user.login') {
+            socket.send(JSON.stringify({ cmd: 'user.login', id: request.id, data: null, error: REJECTED }));
+        }
+    });
+    t.after(() => server.close());
+
+    const runtime = createRuntime(registerWebIQConnect);
+    const node = createConnectionNode(runtime, server.port, {
+        loginTimeout: 5,
+        heartbeat: 0,
+        loginAttempts: 1
+    });
+    t.after(() => stopConnectionNode(node));
+
+    await waitFor(() => node.statuses.some((s) => s.text === 'login blocked - fix and redeploy'), 'latched');
+    assert.equal(server.requests.length, 1);
+
+    // First reconnect: allowed, grants ONE attempt, which fails and re-latches.
+    node.emit('input', { webiq: 'reconnect' }, undefined, () => {});
+    await waitFor(() => server.requests.length === 2, 'exactly one granted attempt');
+    await waitFor(
+        () => node.statuses.filter((s) => s.text === 'login blocked - fix and redeploy').length >= 2,
+        're-latched after the single granted attempt'
+    );
+
+    // Second reconnect immediately after: refused by the cooldown.
+    const refusal = await new Promise((resolve) => {
+        node.emit('input', { webiq: 'reconnect' }, undefined, resolve);
+    });
+    assert.ok(refusal instanceof Error);
+    assert.match(String(refusal), /reconnect refused/i);
+
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    assert.equal(server.requests.length, 2, 'the refused reconnect must not reach the server');
+});
+
+test('a payload on the reconnect control message is reported as NOT sent', async (t) => {
+    const server = await createWebIQServer(loginResponder(null));
+    t.after(() => server.close());
+
+    const runtime = createRuntime(registerWebIQConnect);
+    const node = createConnectionNode(runtime, server.port, { loginTimeout: 5, heartbeat: 0 });
+    t.after(() => stopConnectionNode(node));
+
+    await waitFor(() => node.statuses.some((s) => s.text === 'authenticated'), 'authenticated');
+    const requestsBefore = server.requests.length;
+
+    const err = await new Promise((resolve) => {
+        node.emit('input', {
+            webiq: 'reconnect',
+            payload: { cmd: 'io.write', id: 9, data: { Tag: 1 } }
+        }, undefined, resolve);
+    });
+
+    assert.ok(err instanceof Error, 'the flow must learn the write did not happen');
+    assert.match(String(err), /NOT sent/);
+    assert.equal(server.requests.length, requestsBefore, 'the payload must not reach the server');
+});
+
+test('secure:true against a plaintext server sends nothing, never authenticates', async (t) => {
+    const server = await createWebIQServer(loginResponder(null));
+    t.after(() => server.close());
+
+    const runtime = createRuntime(registerWebIQConnect);
+    const node = createConnectionNode(runtime, server.port, {
+        loginTimeout: 5,
+        heartbeat: 0,
+        secure: true
+    });
+    t.after(() => stopConnectionNode(node));
+
+    await new Promise((resolve) => setTimeout(resolve, 700));
+
+    assert.equal(server.requests.length, 0, 'no frame may cross when TLS was requested');
+    assert.equal(node.statuses.some((s) => s.text === 'authenticated'), false);
 });

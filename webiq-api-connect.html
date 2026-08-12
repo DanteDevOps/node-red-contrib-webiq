@@ -28,6 +28,15 @@
                     var n = Number(v);
                     return isFinite(n) && n >= 0 && n <= 3600;
                 }
+            },
+            loginAttempts: {
+                value: 5,
+                validate: function (v) {
+                    // Must agree with the runtime clamp: 1..20, empty means 5.
+                    if (v === "" || v === undefined) { return true; }
+                    var n = Number(v);
+                    return isFinite(n) && n >= 1 && n <= 20;
+                }
             }
         },
         // Stored in Node-RED's credential store, not in flows.json, and stripped
@@ -115,6 +124,15 @@
         is undetectable: the node keeps reporting <b>authenticated</b> while every request
         disappears. Set <b>0</b> to disable.
     </div>
+    <div class="form-row">
+        <label for="node-input-loginAttempts"><i class="fa fa-ban"></i> Login attempts</label>
+        <input type="number" id="node-input-loginAttempts" min="1" max="20" placeholder="5" style="width:100px;"> attempts
+    </div>
+    <div class="form-tips">
+        How many rejected logins before the node stops and waits for you. WebIQ counts
+        login attempts server-side and can lock the account - usually the same account
+        the operator HMI uses - so retrying a wrong password forever is not harmless.
+    </div>
 </script>
 
 <script type="text/html" data-help-name="webiq-api-connect">
@@ -173,5 +191,27 @@
             data but ignores pings is never treated as dead. Without a heartbeat, a
             connection that drops without a TCP close stays <code>authenticated</code>
             indefinitely and never reconnects.</dd>
+
+        <dt>Login attempts <span class="property-type">number</span></dt>
+        <dd>How many consecutive <i>rejected</i> logins (default <code>5</code>,
+            range 1&ndash;20) before the node latches: badge
+            <code>login blocked - fix and redeploy</code>, no further attempts. WebIQ
+            counts login attempts server-side and can lock the account, and a reply of
+            "too many login attempts" latches immediately. Logins that go
+            <i>unanswered</i> never latch - after the same count the node falls back to
+            one probe every 5 minutes and recovers on its own when the server answers,
+            so a server that is slow to boot cannot permanently strand the node.</dd>
     </dl>
+
+    <h3>Recovering a blocked node</h3>
+    <p>A latched node refuses messages with the reason. Either fix the credentials and
+       redeploy, or send it a message with <code>msg.webiq = "reconnect"</code>: this
+       grants <b>one</b> fresh login attempt, at most once per 60 seconds. Any
+       <code>msg.payload</code> on the control message is <b>not</b> sent - the message
+       fails with an error saying so, and the request must be re-sent once the node is
+       authenticated.</p>
+    <p>Connection-level failures (login rejected, link stale, upgrade rejected) are
+       reported in the log and on the status badge; use a <b>Status</b> node to alarm on
+       them. Errors tied to a message you sent - and any request the server answers with
+       an error frame - are also routed to <b>Catch</b> nodes.</p>
 </script>

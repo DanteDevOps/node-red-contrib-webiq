@@ -40,21 +40,21 @@ module.exports = function (RED) {
     const LOCKOUT_ERRC = 8;
     const LOCKOUT_PATTERN = /too many login attempts|locked|blocked/i;
 
-    // Total consecutive failed logins - rejections AND timeouts, across sockets -
-    // before the node gives up entirely. Counted node-wide on purpose: a per-socket
-    // counter resets every time the server hangs up, so the ladder never climbs and
-    // the node can burn login attempts indefinitely against an account that other
-    // WebIQ clients (the HMI itself) also depend on.
-    const MAX_LOGIN_ATTEMPTS = 5;
+    // Server-controlled text ends up in status badges, log lines and Error objects
+    // that flows replay. One choke point bounds it: control characters stripped
+    // (no ANSI/log forgery), length capped (no multi-megabyte Error messages).
+    function sanitizeServerText(value) {
+        return String(value).replace(/[\u0000-\u001F\u007F]/g, ' ').slice(0, 200);
+    }
 
     function describeServerError(error) {
         if (!error) { return 'unknown error'; }
         const parts = [];
-        if (error.category) { parts.push(error.category); }
-        if (error.errc !== undefined) { parts.push('errc ' + error.errc); }
-        if (error.code !== undefined) { parts.push('code ' + error.code); }
+        if (error.category) { parts.push(sanitizeServerText(error.category)); }
+        if (error.errc !== undefined) { parts.push('errc ' + sanitizeServerText(error.errc)); }
+        if (error.code !== undefined) { parts.push('code ' + sanitizeServerText(error.code)); }
         const prefix = parts.length ? `[${parts.join(' ')}] ` : '';
-        return prefix + (error.message || 'no message');
+        return prefix + (error.message ? sanitizeServerText(error.message) : 'no message');
     }
 
     function isLockout(error) {
@@ -141,6 +141,30 @@ module.exports = function (RED) {
         // one would make a single dropped frame - or a server that is briefly busy -
         // look like a dead link.
         const heartbeatMissThreshold = 2;
+
+        // How many consecutive REJECTED logins to attempt before latching. Counted
+        // node-wide, across sockets, because a per-socket counter resets every time
+        // the server hangs up. Configurable: sites differ in how aggressive their
+        // WebIQ lockout policy is. The floor of 1 and ceiling of 20 keep both
+        // "latch instantly by accident" and "never latch" out of reach.
+        //
+        // Login TIMEOUTS deliberately spend a different budget with a different
+        // ending: after the same count of unanswered logins the node drops to one
+        // probe every five minutes instead of latching. Silence usually means the
+        // server is down or still booting its PLC project - it is not counting
+        // attempts, and a terminal latch would leave an unattended gateway dead
+        // forever over a transient outage.
+        const defaultLoginAttempts = 5;
+        const maxConfigurableLoginAttempts = 20;
+        const configuredLoginAttempts = Number(config.loginAttempts);
+        const loginAttemptsIsValid = Number.isFinite(configuredLoginAttempts) && configuredLoginAttempts >= 1;
+        const maxLoginAttempts = loginAttemptsIsValid
+            ? Math.min(Math.floor(configuredLoginAttempts), maxConfigurableLoginAttempts)
+            : defaultLoginAttempts;
+
+        if (loginAttemptsIsValid && configuredLoginAttempts > maxConfigurableLoginAttempts) {
+            node.warn(`Login attempts of ${configuredLoginAttempts} exceeds the ${maxConfigurableLoginAttempts} maximum; using ${maxConfigurableLoginAttempts}.`);
+        }
 
         // TLS. Certificate handling is delegated entirely to Node-RED's own
         // tls-config node, which owns the CA / client-certificate / passphrase
@@ -255,11 +279,28 @@ module.exports = function (RED) {
         let reconnectDelay = 1000;
         let closing = false;
 
-        // Login budget and terminal latch. Both are node-scoped so they survive the
-        // socket churn that a rejecting server causes.
-        let loginAttemptsUsed = 0;
+        // Login accounting and the terminal latch. All node-scoped so they survive
+        // the socket churn a failing server causes. Rejections and timeouts are
+        // counted separately because they end differently: rejections latch
+        // terminally (the server actively said no - that cannot fix itself),
+        // timeouts fall back to a slow probe (silence usually means the server is
+        // down or booting, and it recovers on its own).
+        let loginRejections = 0;
+        let loginTimeouts = 0;
         let authLatched = false;
         let authLatchReason = null;
+
+        // The reconnect control verb is rate-limited: an automated
+        // Catch -> change -> reconnect loop would otherwise turn the escape hatch
+        // into exactly the login hammer the latch exists to prevent.
+        let lastForcedReconnectAt = 0;
+        const reconnectCooldownMs = 60000;
+
+        // Cadence of the standing probe once logins have gone unanswered
+        // maxLoginAttempts times: slow enough to never trouble any attempt
+        // limiter, frequent enough that a recovered server is picked up in
+        // minutes without human help.
+        const restingRetryDelayMs = 5 * 60 * 1000;
 
         const initialReconnectDelay = 1000;
         const maxReconnectDelay = 30000;
@@ -300,7 +341,6 @@ module.exports = function (RED) {
                 upgradePermanent: false,
                 sendDegraded: false,
                 loginAttempted: false,
-                authFailures: 0,
                 missedHeartbeats: 0,
                 timers: { loginTimeout: null, authRetry: null, stability: null, heartbeat: null },
                 handlers: {}
@@ -372,7 +412,11 @@ module.exports = function (RED) {
         function clearAuthLatch() {
             authLatched = false;
             authLatchReason = null;
-            loginAttemptsUsed = 0;
+            // "Retry once" means once. An unlatch grants a single fresh attempt,
+            // not a whole new budget - if the cause was not actually fixed, the
+            // very next rejection re-latches instead of hammering N more times.
+            loginRejections = Math.max(0, maxLoginAttempts - 1);
+            loginTimeouts = 0;
         }
 
         // Any traffic at all proves the link is alive, not just a pong. A WebIQ
@@ -426,6 +470,26 @@ module.exports = function (RED) {
 
         function connect() {
             if (closing || authLatched) { return; }
+
+            // A pending reconnect must not survive a direct connect. The forgotten
+            // timer would fire a second connect() up to 30s later, replace
+            // activeContext, and orphan this socket - open, possibly authenticated,
+            // and unreachable by every owns()-guarded handler including its own
+            // close handler: a leaked WebIQ session.
+            if (reconnectTimer) {
+                clearTimeout(reconnectTimer);
+                reconnectTimer = null;
+            }
+
+            // Belt and braces for the same class of bug: whatever context is still
+            // active is superseded NOW, not left to be discovered.
+            if (activeContext) {
+                const stale = activeContext;
+                activeContext = null;
+                clearTimers(stale);
+                detachHandlers(stale);
+                try { stale.socket.terminate(); } catch (_) {}
+            }
 
             let socket;
             try {
@@ -494,9 +558,13 @@ module.exports = function (RED) {
                 // the same wire looking exactly like a confirmed write, and a flow
                 // that treats an emitted message as success reports a setpoint that
                 // was never applied.
-                if (parsed && parsed.error && parsed.cmd !== 'user.login') {
+                // Exclude only the node's OWN login (cmd AND reserved id): a
+                // user.login a flow sent itself (id !== 0) failing must still be
+                // catchable, or a rejected user-level elevation vanishes silently.
+                if (parsed && parsed.error &&
+                    !(parsed.cmd === 'user.login' && parsed.id === LOGIN_REQUEST_ID)) {
                     node.error(
-                        new Error(`WebIQ rejected ${parsed.cmd || 'request'}: ${describeServerError(parsed.error)}`),
+                        new Error(`WebIQ rejected ${sanitizeServerText(parsed.cmd || 'request')}: ${describeServerError(parsed.error)}`),
                         out
                     );
                 }
@@ -557,12 +625,16 @@ module.exports = function (RED) {
                 // Preserve the badge whichever path we arrived by. These used to be
                 // repainted to a generic 'disconnected' within milliseconds, so
                 // states the documentation described were never actually observable.
-                if (ctx.failureKind === 'project-not-found') {
-                    node.status({ fill: 'red', shape: 'ring', text: 'project not found' });
-                } else if (ctx.failureKind === 'heartbeat-timeout') {
+                if (ctx.failureKind === 'heartbeat-timeout') {
                     node.status({ fill: 'red', shape: 'ring', text: 'link stale - reconnecting' });
                 } else if (ctx.failureKind === 'login-timeout') {
-                    node.status({ fill: 'red', shape: 'ring', text: 'login timeout' });
+                    node.status(loginTimeouts >= maxLoginAttempts
+                        ? { fill: 'red', shape: 'ring', text: 'login unanswered - retrying every 5m' }
+                        : { fill: 'red', shape: 'ring', text: 'login timeout' });
+                } else if (ctx.failureKind === 'auth-rejected') {
+                    // A server that hangs up after rejecting must not erase the
+                    // attempt count from the canvas.
+                    node.status({ fill: 'yellow', shape: 'ring', text: `login failed (${loginRejections}/${maxLoginAttempts})` });
                 } else if (String(ctx.failureKind).startsWith('http-upgrade-')) {
                     // The error handler already reported it with the right severity.
                 } else if (!ctx.loginAttempted) {
@@ -598,12 +670,25 @@ module.exports = function (RED) {
 
                 setState(ctx, STATE.RECONNECT_WAIT);
 
-                // A misconfigured endpoint cannot start working on its own, so
-                // hammering it on the fast ladder only generates noise.
-                const misconfigured = ctx.failureKind === 'project-not-found' ||
-                    ctx.failureKind === 'login-timeout' ||
-                    ctx.upgradePermanent === true;
-                scheduleReconnect(misconfigured ? slowRetryDelay : undefined);
+                // Pick the cadence by failure class. A rejecting server that hangs
+                // up per attempt must climb the AUTH ladder (from the node-scoped
+                // rejection count - a per-socket count restarts at zero every
+                // reconnect, which is how five logins once fired in ~15 seconds,
+                // the exact burst most likely to trip the server's limiter). A
+                // misconfigured endpoint gets the slow ladder; exhausted timeouts
+                // get the resting probe.
+                let delay;
+                if (ctx.failureKind === 'auth-rejected') {
+                    delay = Math.min(
+                        initialAuthRetryDelay * Math.pow(2, Math.max(0, loginRejections - 1)),
+                        maxAuthRetryDelay
+                    );
+                } else if (ctx.failureKind === 'login-timeout') {
+                    delay = loginTimeouts >= maxLoginAttempts ? restingRetryDelayMs : slowRetryDelay;
+                } else if (ctx.upgradePermanent === true) {
+                    delay = slowRetryDelay;
+                }
+                scheduleReconnect(delay);
             };
 
             socket.on('open', ctx.handlers.open);
@@ -631,8 +716,8 @@ module.exports = function (RED) {
             if (!message.error) {
                 ctx.authenticatedAt = Date.now();
                 ctx.failureKind = null;
-                ctx.authFailures = 0;
-                loginAttemptsUsed = 0;
+                loginRejections = 0;
+                loginTimeouts = 0;
                 if (ctx.timers.authRetry) {
                     clearTimeout(ctx.timers.authRetry);
                     ctx.timers.authRetry = null;
@@ -659,21 +744,12 @@ module.exports = function (RED) {
                 return;
             }
 
-            if (message.error.code === 404) {
-                // The project is wrong or not yet loaded. Report it, forward the frame
-                // (the caller does that), then close so the normal reconnect path runs
-                // on a slow ladder - rather than sitting on a live, unauthenticated
-                // socket forever with no timer armed and no way back.
-                ctx.failureKind = 'project-not-found';
-                setState(ctx, STATE.AUTH_RETRY_WAIT, { fill: 'red', shape: 'ring', text: 'project not found' });
-                node.error("WebIQ project name invalid: " + message.error.message);
-                try { ctx.socket.close(); } catch (_) {}
-                return;
-            }
-
+            // NOTE: there is deliberately no branch for a JSON "project not found"
+            // here. Real WebIQ never sends one - the project is a URL path segment,
+            // so a wrong project is rejected at the HTTP upgrade and never reaches
+            // a login. Any JSON login error, whatever its shape, is a rejection.
             ctx.failureKind = 'auth-rejected';
-            ctx.authFailures += 1;
-            loginAttemptsUsed += 1;
+            loginRejections += 1;
 
             const described = describeServerError(message.error);
 
@@ -684,25 +760,27 @@ module.exports = function (RED) {
                 return;
             }
 
-            if (loginAttemptsUsed >= MAX_LOGIN_ATTEMPTS) {
-                latchAuthFailure(`${loginAttemptsUsed} consecutive failed logins (last: ${described})`);
+            if (loginRejections >= maxLoginAttempts) {
+                latchAuthFailure(`${loginRejections} consecutive rejected logins (last: ${described})`);
                 return;
             }
 
+            // Ladder from the NODE-scoped count: a per-socket count restarts at
+            // zero when the server hangs up per attempt, and the ladder never climbs.
             const authRetryDelay = Math.min(
-                initialAuthRetryDelay * Math.pow(2, ctx.authFailures - 1),
+                initialAuthRetryDelay * Math.pow(2, loginRejections - 1),
                 maxAuthRetryDelay
             );
 
             setState(ctx, STATE.AUTH_RETRY_WAIT, {
                 fill: 'yellow',
                 shape: 'ring',
-                text: `login failed (${loginAttemptsUsed}/${MAX_LOGIN_ATTEMPTS})`
+                text: `login failed (${loginRejections}/${maxLoginAttempts})`
             });
             // Always relay the server's own words: it is the only thing that
             // distinguishes a wrong password from a licence limit or a lockout, and
             // discarding it sends the user to check the wrong thing.
-            node.warn(`WebIQ login rejected ${described} - attempt ${loginAttemptsUsed} of ${MAX_LOGIN_ATTEMPTS}, retrying in ${authRetryDelay / 1000}s.`);
+            node.warn(`WebIQ login rejected ${described} - attempt ${loginRejections} of ${maxLoginAttempts}, retrying in ${authRetryDelay / 1000}s.`);
 
             if (ctx.timers.authRetry) { clearTimeout(ctx.timers.authRetry); }
             ctx.timers.authRetry = setTimeout(function () {
@@ -733,34 +811,44 @@ module.exports = function (RED) {
                 ctx.timers.loginTimeout = null;
                 if (ctx.state === STATE.AUTHENTICATED) { return; }
 
+                // A reply arriving after we gave up must not be counted or acted
+                // on: without this, one wire login could spend two budget units,
+                // and a late SUCCESS would paint 'authenticated' and start a
+                // heartbeat on a socket we are about to tear down.
+                ctx.pendingLoginId = null;
+
                 ctx.failureKind = 'login-timeout';
+                loginTimeouts += 1;
 
-                // A login the server never answered may still have been counted by
-                // its attempt limiter, so it spends the same budget as a rejection.
-                // Without this, a slow project reconnects on the fast transport
-                // ladder and issues thousands of logins a day with no typo involved.
-                loginAttemptsUsed += 1;
+                // Silence never latches terminally. A server that is down, booting,
+                // or loading a heavy PLC project is not counting login attempts -
+                // a terminal latch here would leave an unattended gateway dead
+                // forever over a transient outage. After the budget, fall back to
+                // one probe every five minutes so a recovered server is picked up
+                // without human help.
+                const resting = loginTimeouts >= maxLoginAttempts;
+                node.status(resting
+                    ? { fill: 'red', shape: 'ring', text: 'login unanswered - retrying every 5m' }
+                    : { fill: 'red', shape: 'ring', text: 'login timeout' });
+                node.error(`No login reply received within ${loginTimeoutSeconds}s (unanswered login ${loginTimeouts}): the server may be unreachable or slow to answer, or the timeout may be too short for this project.${resting ? ' Falling back to one attempt every 5 minutes until the server answers.' : ''}`);
 
-                node.status({ fill: 'red', shape: 'ring', text: 'login timeout' });
-                node.error(`No login reply received within ${loginTimeoutSeconds}s (attempt ${loginAttemptsUsed} of ${MAX_LOGIN_ATTEMPTS}): the server may be unreachable or slow to answer, or the timeout may be too short for this project.`);
-
-                if (loginAttemptsUsed >= MAX_LOGIN_ATTEMPTS) {
-                    latchAuthFailure(`${loginAttemptsUsed} consecutive logins went unanswered`);
-                    return;
-                }
-
-                try { socket.close(); } catch (_) {}
+                // terminate(), not close(): this peer just proved unresponsive, and
+                // close() would wait on ws's internal 30s timer for a close frame
+                // that may never come.
+                try { socket.terminate(); } catch (_) {}
             }, loginTimeoutMs);
         }
 
         // +/-20% jitter, so a site with many gateways does not stampede a WebIQ
         // server the instant it comes back up.
         function withJitter(delay) {
-            // Clamped after jittering, so the documented 30s ceiling is a real
-            // ceiling rather than 30s +20%.
+            // Clamp after jittering so a documented ceiling is a real ceiling - but
+            // clamp against the LARGER of the base delay and the transport ceiling,
+            // otherwise a deliberately slow cadence (the 5-minute resting probe)
+            // would be silently compressed to 30s.
             return Math.min(
                 Math.round(delay * (0.8 + (Math.random() * 0.4))),
-                maxReconnectDelay
+                Math.max(delay, maxReconnectDelay)
             );
         }
 
@@ -794,13 +882,45 @@ module.exports = function (RED) {
             // Escape hatch from the terminal latch that does not need a redeploy -
             // an unattended site can be recovered by a flow once the cause is fixed.
             if (msg && msg.webiq === 'reconnect') {
-                const wasLatched = authLatched;
-                clearAuthLatch();
-                if (wasLatched || !activeContext) {
+                // "Connected" means a socket that is OPEN or still CONNECTING. A
+                // context whose socket is CLOSING/CLOSED is a dying connection the
+                // close handler has not reaped yet - a reconnect request during that
+                // window must act, not be silently swallowed.
+                const liveSocket = !!(activeContext && activeContext.socket &&
+                    (activeContext.socket.readyState === WebSocket.OPEN ||
+                     activeContext.socket.readyState === WebSocket.CONNECTING));
+                const wantsAction = authLatched || !liveSocket;
+
+                // Rate-limited: an automated Catch -> reconnect loop would otherwise
+                // unlatch-and-retry on every message, turning this escape hatch into
+                // the login hammer the latch exists to prevent.
+                if (wantsAction) {
+                    const now = Date.now();
+                    const sinceLast = now - lastForcedReconnectAt;
+                    if (sinceLast < reconnectCooldownMs) {
+                        done(new Error(`WebIQ reconnect refused: the last forced reconnect was ${Math.round(sinceLast / 1000)}s ago; wait ${Math.ceil((reconnectCooldownMs - sinceLast) / 1000)}s. This limit protects the account from the server's login-attempt limiter.`));
+                        return;
+                    }
+                    lastForcedReconnectAt = now;
+
+                    if (authLatched) {
+                        // Grants exactly ONE fresh attempt - see clearAuthLatch().
+                        clearAuthLatch();
+                    }
                     node.status({ fill: 'grey', shape: 'ring', text: 'reconnecting on request' });
                     connect();
                 }
-                done();
+                // A healthy node treats the verb as a no-op; the budget is NOT
+                // touched, so a periodic "nudge" cannot restore infinite retry.
+
+                // A payload on a control message is not sent anywhere. Failing the
+                // message says so - a recovery flow that re-sends the failed write
+                // with the flag attached must learn the write did NOT happen.
+                if (msg.payload !== undefined) {
+                    done(new Error('WebIQ reconnect control message: the payload was NOT sent. Resend the request once the node is authenticated.'));
+                } else {
+                    done();
+                }
                 return;
             }
 

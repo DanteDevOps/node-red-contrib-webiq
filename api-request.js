@@ -98,7 +98,11 @@ module.exports = function (RED) {
                     return;
                 }
 
-                msg.payload = payload;
+                // Clone here too: flow and global context return the STORED object
+                // by reference, so emitting it directly would let any downstream
+                // node permanently corrupt the template for every later message -
+                // the exact hazard the static path already clones against.
+                msg.payload = clone(payload);
                 send(msg);
                 done();
             });

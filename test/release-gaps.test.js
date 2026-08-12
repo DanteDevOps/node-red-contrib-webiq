@@ -57,7 +57,12 @@ test('a circular outbound payload becomes an input-scoped error instead of throw
     assert.ok(doneError instanceof Error);
 });
 
-test('a project-not-found login response is emitted and the socket is closed', async (t) => {
+test('a legacy code-404 login error is an ordinary rejection, not "project not found"', async (t) => {
+    // Real WebIQ never sends a JSON 404 for a wrong project - the project is a URL
+    // path segment, rejected at the HTTP upgrade before any login exists. The old
+    // dedicated branch keyed on error.code, a field the real server does not emit,
+    // and was deleted after the field campaign proved it unreachable. Any JSON
+    // login error, whatever its shape, now walks the rejection ladder.
     const server = await createWebIQServer(({ request, socket }) => {
         if (request.cmd === 'user.login') {
             socket.send(JSON.stringify({
@@ -77,18 +82,18 @@ test('a project-not-found login response is emitted and the socket is closed', a
     t.after(() => stopConnectionNode(node));
 
     await waitFor(
-        () => node.statuses.some((status) => status.text === 'project not found'),
-        'project-not-found status'
+        () => node.statuses.some((status) => /login failed \(1\//.test(status.text)),
+        'rejection badge with attempt count'
     );
     await waitFor(
         () => node.sent.some((msg) => msg.payload && msg.payload.error?.code === 404),
-        'project-not-found output',
+        'error frame still forwarded',
         250
     );
-    await waitFor(
-        () => server.requests.length > 0 && [...server.clients].every((client) => client.readyState > 1),
-        'project-not-found socket close',
-        250
+    assert.equal(
+        node.statuses.some((status) => status.text === 'project not found'),
+        false,
+        'the unreachable badge must never appear'
     );
 });
 

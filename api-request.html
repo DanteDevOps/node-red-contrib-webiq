@@ -5,9 +5,12 @@ RED.nodes.registerType('api-request', {
     defaults: {
         name: { value: "" },
         data: {
+            // id 1, not 0: id 0 is reserved for the connect node's own login, so a
+            // flow that filters replies by id would ingest login replies on every
+            // reconnect.
             value: `{
     "cmd": "io.read",
-    "id": 0,
+    "id": 1,
     "data": ["DSin", "SInt"]
 }`
         },
@@ -45,7 +48,9 @@ RED.nodes.registerType('api-request', {
     The request sent to the WebIQ server. Choose <b>JSON</b> to write it inline, or
     <b>msg</b> / <b>flow</b> / <b>global</b> / <b>env</b> to take it from elsewhere at
     runtime. However it is produced, it must contain <code>cmd</code>, <code>id</code>
-    and <code>data</code>.
+    and <code>data</code>. Replies come back on the connection node's single output,
+    so give <b>each</b> API Request node its own <code>id</code> to tell them apart —
+    and never <code>0</code>, which is reserved for the connection's own login.
 </div>
 </script>
 

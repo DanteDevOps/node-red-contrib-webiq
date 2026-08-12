@@ -143,3 +143,21 @@ test('a context source with nothing stored fails without emitting', async () => 
     assert.match(String(err), /not a request object/);
     assert.equal(node.sent.length, 0);
 });
+
+test('a flow-context template is cloned, so downstream mutation cannot corrupt the store', async () => {
+    const runtime = createRuntime(registerApiRequest);
+    const node = runtime.create('api-request', {
+        data: 'webiqRequest',
+        dataType: 'flow'
+    });
+
+    const stored = { cmd: 'io.read', id: 3, data: ['Tag'] };
+    node._flowContext = { webiqRequest: stored };
+
+    await drive(node, {});
+    node.sent[0].payload.data.push('MUTATED');
+    await drive(node, {});
+
+    assert.deepEqual(node.sent[1].payload.data, ['Tag'], 'second message must be unaffected');
+    assert.deepEqual(stored.data, ['Tag'], 'the stored context object itself must be untouched');
+});
