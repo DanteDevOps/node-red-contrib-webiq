@@ -1,11 +1,23 @@
 # node-red-contrib-webiq
 
-This package is an independent WebIQ Node-RED integration focused on WebSocket reconnect stability and API request handling.
+This package is an independent WebIQ Node-RED integration focused on connection
+reliability: detecting links that die without notice, recovering from them, and
+never silently losing a request along the way.
 
 ## Features
 
-- **WebIQ API Connect Node**: Establishes a connection to the WebIQ server.
-- **API Request Node**: Allows you to send commands to the WebIQ server by injecting `cmd`, `id`, and `data` fields.
+- **WebIQ API Connect Node** — holds the WebSocket connection to a WebIQ server:
+  logs in, reconnects with exponential backoff and jitter, and detects a link that
+  has died *without* a TCP close via a ping/pong heartbeat. Supports `wss://` with a
+  standard Node-RED `tls-config` node, keeps credentials in Node-RED's credential
+  store rather than the flow file, and stops rather than retrying a rejected login
+  into a server-side account lockout.
+- **API Request Node** — builds the request sent to the server. The whole request is
+  one JSON object (`cmd`, `id`, `data`), written inline or taken at runtime from
+  `msg` / `flow` / `global` / `env`.
+- **Errors surface.** Failures reach **Catch** nodes, including requests the *server*
+  rejects — an `io.write` refused for an unknown tag or insufficient rights no longer
+  looks identical to one that succeeded.
 
 ## Installation
 
@@ -152,6 +164,7 @@ The node's status badge names the problem. The most common ones:
 | `TLS config unresolved` | A TLS configuration is selected but the config node is missing. | The node refuses to connect rather than silently falling back to unencrypted — re-select or recreate the `tls-config` node. |
 | `TLS config invalid` | The selected configuration is not a `tls-config` node. | Its certificate settings could not be applied, so the node refuses rather than connecting without them. Re-select a real `tls-config` node. |
 | `host missing` | The Host field is empty. | Fill it in. |
+| `invalid connection settings` | The WebSocket could not be created from these settings at all. | Rare — the host/port combination is malformed in a way the earlier checks did not catch. The node retries every 30 s in case an environment variable or DNS entry fixes it. |
 | `invalid host` | The Host contains URL syntax — userinfo (`@`), a scheme, a path, a query/fragment character, whitespace, or an embedded port. | Enter only the host name or IP; the port belongs in the Port field. Userinfo is rejected because `trusted.example@10.0.0.9` looks like one host but connects to another — and would send your credentials there. |
 | `invalid port` | Port is not an integer in 1–65535. | In 1.x an empty port silently dialled port 80 and reported it as a project failure. Set the real port, usually `10123`. |
 | `project missing` / `invalid project` | Project is empty, or contains `/`, `?`, `#` or `\`. | Use the project name or UUID only, not a URL or path. |
@@ -185,6 +198,7 @@ Errors you may see on a message (all trappable with a **Catch** node):
 | `WebIQ reconnect refused: ...` | A `msg.webiq = "reconnect"` arrived inside the 60 s cooldown. |
 | `WebIQ reconnect control message: the payload was NOT sent...` | A reconnect control message also carried a payload; the payload was not sent — resend it after the node authenticates. |
 | `WebIQ send buffer is backed up ...` | Backpressure: the request was dropped, not queued. |
+| `Unusable WebIQ frame forwarded as raw data: ...` | A frame could not be parsed, or was nested deeper than 64 levels. It is forwarded as a raw buffer instead of an object, so `msg.payload` arrives as a `Buffer`. The depth limit exists because Node-RED clones messages recursively, and an over-deep frame would otherwise crash the runtime. |
 
 If a request seems to vanish, check that the connection node reached
 `authenticated` (green). Requests sent while it is any other colour are rejected
