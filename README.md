@@ -29,7 +29,7 @@ npm install node-red-contrib-webiq
    - **TLS config**: Optional. Points at a standard Node-RED `tls-config` node for custom CAs, client certificates or a passphrase. Selecting one implies **Secure**. Certificate verification is controlled by that node's own *Verify server certificate* setting — this node never overrides it.
    - **Username** / **Password**: Your WebIQ project credentials. Stored in Node-RED's credential store, not in `flows.json`, and stripped from flow exports.
    - **Login timeout**: Seconds to wait for the server's login reply before reporting a timeout and reconnecting. Defaults to `5`, maximum `86400`. Raise this if the project is backed by a slow PLC — a login that takes longer than the timeout will otherwise loop without ever authenticating.
-   - **Heartbeat**: Seconds between liveness probes once authenticated. Defaults to `30`; `0` disables. Without it, a connection that dies without a TCP close keeps reporting `authenticated` forever while every request disappears.
+   - **Heartbeat**: Seconds between liveness probes once authenticated. Defaults to `30`; `0` disables; values between 0 and 1 are raised to 1 second. Without it, a connection that dies without a TCP close keeps reporting `authenticated` forever while every request disappears.
    - **Login attempts**: How many consecutive *rejected* logins (default `5`, range 1–20) before the node latches and stops trying — WebIQ counts attempts server-side and can lock the account. A lockout reply latches immediately. Logins that go *unanswered* never latch: after the same count the node falls back to one probe every 5 minutes and recovers on its own.
 3. Deploy the changes.
 
@@ -132,6 +132,7 @@ The node's status badge names the problem. The most common ones:
 | `TLS config unresolved` | A TLS configuration is selected but the config node is missing. | The node refuses to connect rather than silently falling back to unencrypted — re-select or recreate the `tls-config` node. |
 | `TLS config invalid` | The selected configuration is not a `tls-config` node. | Its certificate settings could not be applied, so the node refuses rather than connecting without them. Re-select a real `tls-config` node. |
 | `host missing` | The Host field is empty. | Fill it in. |
+| `invalid host` | The Host contains URL syntax — userinfo (`@`), a scheme, a path, a query/fragment character, whitespace, or an embedded port. | Enter only the host name or IP; the port belongs in the Port field. Userinfo is rejected because `trusted.example@10.0.0.9` looks like one host but connects to another — and would send your credentials there. |
 | `invalid port` | Port is not an integer in 1–65535. | In 1.x an empty port silently dialled port 80 and reported it as a project failure. Set the real port, usually `10123`. |
 | `project missing` / `invalid project` | Project is empty, or contains `/`, `?`, `#` or `\`. | Use the project name or UUID only, not a URL or path. |
 | `connected - login pending` (stuck) | The socket opened but the server has not answered the login. | Usually a slow PLC. Raise **Login timeout**. |

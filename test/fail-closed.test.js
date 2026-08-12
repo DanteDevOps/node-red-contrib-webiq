@@ -246,7 +246,7 @@ test('inbound ping frames count as liveness', async (t) => {
         t.after(() => clearInterval(pinger));
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await new Promise((resolve) => setTimeout(resolve, 3000));
 
     assert.equal(
         node.statuses.some((s) => s.text === 'link stale - reconnecting'),
@@ -261,7 +261,7 @@ function createConnectionNodeNoPong(runtime, port) {
         port: String(port),
         project: 'test-project',
         loginTimeout: 5,
-        heartbeat: 0.15,
+        heartbeat: 1,
         credentials: { username: 'u', password: 'p' }
     });
 }

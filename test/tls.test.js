@@ -32,10 +32,18 @@ function makeSelfSignedCert() {
     };
 }
 
+// Clean up the generated certificate directory when the process exits, so a
+// test run does not leave temp dirs behind.
+let certDir = null;
+process.on('exit', () => {
+    if (certDir) { try { fs.rmSync(certDir, { recursive: true, force: true }); } catch (_) {} }
+});
+
 let certs = null;
 let skipReason = null;
 try {
     certs = makeSelfSignedCert();
+    certDir = certs.dir;
 } catch (err) {
     skipReason = `openssl unavailable: ${err.message}`;
 }

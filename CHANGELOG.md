@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [2.0.0] - 2026-07-30
+## [2.0.0] - 2026-08-12
 
 ### Added — WebIQ API Connect Node
 - **Connection heartbeat (the headline feature).** A new **Heartbeat** field (seconds, default `30`, `0` disables) sends a WebSocket ping once the connection is authenticated, and terminates the link after two consecutive intervals with no pong *and* no other inbound traffic. Any traffic counts as evidence of life, so a server that streams data but ignores pings is never treated as dead.
@@ -63,6 +63,15 @@ These came out of 17 manual tests against live hardware. Several are cases no un
 - **A wrong project name is diagnosed where it actually surfaces.** The project is a URL path segment, so an unknown project is refused at the HTTP upgrade — it never reaches a login. The upgrade-rejection error now names the configured project as the most likely cause instead of sending users to inspect their network.
 - **Disabling the heartbeat is no longer silent.** `heartbeat: 0` restores exactly the 1.x failure this release exists to fix, so it now warns at deploy time. An out-of-range heartbeat is also warned about, matching what the login timeout already did.
 
+### Fixed — fourth audit round (security and crash hardening)
+A further independent review, reproduced in full before fixing. Two of these were holes in the previous round's own fixes.
+
+- **A host containing userinfo could redirect the credentials to a different server.** `trusted.example@10.0.0.9` reads as the trusted host to a person but resolves to `10.0.0.9`, and the node connected there and sent the protected WebIQ username and password. Reproduced end to end. The host is now validated as a plain hostname, IPv4 or IPv6 literal: userinfo, schemes, paths, query and fragment characters, whitespace and embedded ports are all rejected with `invalid host`. Docker container names, short container IDs and bracketed or bare IPv6 literals remain supported, and are covered by tests so the validation cannot be over-tightened later.
+- **A malformed server frame could kill the entire Node-RED runtime.** JSON can express `{"toString": null}`, and `String()` on such a value throws `Cannot convert object to primitive value`. That happened inside a WebSocket event handler, so it reached Node-RED's uncaught-exception handler and terminated the process — one bad frame from the server took the gateway down. The sanitizer introduced last round to make server text safe was itself the crash vector. Text coercion is now total, and every read of server-controlled data goes through it.
+- **A peer that read the login and hung up could be retried without limit.** The close arrived before any reply, so it was classified as an ordinary transport drop: fast ladder, no budget consumed, unbounded logins — defeating the account-lockout protection entirely. A socket that dies with a login outstanding now spends the same budget as one that timed out, so the cadence collapses to the slow ladder and then the resting probe.
+- **A reconnect triggered synchronously from a status update left a stale timer.** `node.status()` can re-enter the node: a Status → Change → `msg.webiq="reconnect"` flow establishes a replacement connection from inside the close handler's own status call, and the close handler then carried on and armed a timer that later tore down the healthy replacement. Reconnects are no longer scheduled while a connection exists.
+- **A fractional heartbeat became a ping storm.** `heartbeat: 0.001` was honoured literally — roughly 178 pings in 250 ms. Positive intervals below 1 second are now raised to 1 second with a warning; `0` still disables. A non-integer **Login attempts** value is likewise warned about rather than silently floored.
+
 ### Fixed — third audit round (fresh eyes over the lockout work)
 A full re-audit of the lockout/latch commit — itself unreviewed until then — confirmed four defects in it and several sharp edges. All fixed:
 
@@ -107,7 +116,7 @@ A full re-audit of the lockout/latch commit — itself unreviewed until then —
 - Added `.gitattributes` normalising line endings to LF in the repository. The repository held a mix of CRLF and LF blobs, which made `git diff --check` report trailing whitespace on every edited line.
 - Added the `LICENSE` file. `package.json` had declared `"license": "MIT"` since the first release with no licence text in the repository or the published tarball.
 - `package-lock.json` version resynced with `package.json`; it had been left at 1.1.3 through the 1.1.4 release.
-- **`npm test` now runs the full suite**, and a new **`npm run test:release`** gate refuses to pass when any suite is skipped for a missing prerequisite. Previously the release-gap tests sat behind a separate script, and the TLS and real-runtime suites skipped silently when OpenSSL or a Node-RED install was absent — so a green run could mean no TLS behaviour had been exercised at all. Verified: 36 tests, 0 skipped, against real Node-RED 5.
+- **`npm test` now runs the full suite**, and a new **`npm run test:release`** gate refuses to pass when any suite is skipped for a missing prerequisite. Previously the release-gap tests sat behind a separate script, and the TLS and real-runtime suites skipped silently when OpenSSL or a Node-RED install was absent — so a green run could mean no TLS behaviour had been exercised at all. Verified: 57 tests, 0 skipped, against real Node-RED 5.
 - **The tests now supply credentials the way Node-RED does**, through the credential store rather than as flow properties, and the real-runtime test server authenticates only the exact expected username and password. Previously it accepted any login, so the one test that exists to prove credentials reach production code could have passed while they did not.
 - **`npm pack` no longer nests a previous tarball inside the release.** `*.tgz` was in `.gitignore` but not `.npmignore`, and npm ignores `.gitignore` entirely whenever an `.npmignore` file exists.
 - **The README no longer ships a flow containing plaintext credentials.** It pointed users at an inline example carrying `username`/`password` as flat properties, recreating exactly the pattern this release removes. It now points at the packaged example and documents the 1.x migration.

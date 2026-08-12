@@ -23,10 +23,13 @@
             heartbeat: {
                 value: 30,
                 validate: function (v) {
-                    // 0 is valid here and means "disabled".
+                    // 0 means "disabled"; anything else must be at least 1 second.
+                    // A fractional value such as 0.001 would otherwise be honoured
+                    // literally and produce hundreds of pings a second.
                     if (v === "" || v === undefined) { return true; }
                     var n = Number(v);
-                    return isFinite(n) && n >= 0 && n <= 3600;
+                    if (!isFinite(n)) { return false; }
+                    return n === 0 || (n >= 1 && n <= 3600);
                 }
             },
             loginAttempts: {
@@ -116,7 +119,7 @@
     </div>
     <div class="form-row">
         <label for="node-input-heartbeat"><i class="fa fa-heartbeat"></i> Heartbeat</label>
-        <input type="number" id="node-input-heartbeat" min="0" max="3600" placeholder="30" style="width:100px;"> seconds
+        <input type="number" id="node-input-heartbeat" min="0" max="3600" step="1" placeholder="30" style="width:100px;"> seconds
     </div>
     <div class="form-tips">
         How often to probe the connection once authenticated. Without this, a link that
@@ -144,7 +147,12 @@
     <h3>Settings</h3>
     <dl class="message-properties">
         <dt>Host <span class="property-type">string</span></dt>
-        <dd>WebIQ server hostname, IP address, or Docker container name.</dd>
+        <dd>WebIQ server hostname, IP address, Docker container name, or an IPv6
+            literal (bare or bracketed). This must be the host <i>only</i>: a scheme,
+            path, query, whitespace, an embedded port, or userinfo (<code>@</code>)
+            is rejected as <code>invalid host</code>. Userinfo in particular can make
+            a host look like one server while connecting to another, which would send
+            your credentials there.</dd>
 
         <dt>Port <span class="property-type">number</span></dt>
         <dd>WebIQ server port (for example <code>10123</code>).</dd>

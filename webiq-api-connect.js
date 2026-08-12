@@ -44,7 +44,25 @@ module.exports = function (RED) {
     // that flows replay. One choke point bounds it: control characters stripped
     // (no ANSI/log forgery), length capped (no multi-megabyte Error messages).
     function sanitizeServerText(value) {
-        return String(value).replace(/[\u0000-\u001F\u007F]/g, ' ').slice(0, 200);
+        let text;
+        try {
+            text = typeof value === 'string' ? value : String(value);
+        } catch (_) {
+            // JSON can express {"toString": null}, and String() on that throws
+            // "Cannot convert object to primitive value". This runs inside a ws
+            // event handler, so an escaping throw reaches Node-RED's uncaught
+            // handler and terminates the entire runtime - one malformed frame
+            // from the server would take the gateway down.
+            text = '[unprintable value]';
+        }
+        // Built without any literal control character in the source: writing the
+        // class inline embeds raw bytes and turns this file into a binary blob.
+        let out = '';
+        for (const ch of text.slice(0, 200)) {
+            const c = ch.codePointAt(0);
+            out += (c < 32 || c === 127) ? ' ' : ch;
+        }
+        return out;
     }
 
     function describeServerError(error) {
@@ -57,10 +75,51 @@ module.exports = function (RED) {
         return prefix + (error.message ? sanitizeServerText(error.message) : 'no message');
     }
 
+    // The host is an authority component, so anything that could make a URL parser
+    // read a DIFFERENT server out of it has to be refused. Userinfo is the sharp
+    // case: "trusted.example@10.0.0.9" looks like the trusted host to a human but
+    // resolves to 10.0.0.9 - and the node would send the WebIQ credentials there.
+    function validateHost(raw) {
+        const value = String(raw).trim();
+        const reject = (why) => ({
+            error: `Host "${value}" is not a plain hostname or IP address: ${why}. Enter only the host; the port belongs in the Port field.`,
+            status: 'invalid host'
+        });
+
+        if (value.includes('@')) { return reject('it contains userinfo ("@"), which would redirect the connection and the credentials to the host after it'); }
+        if (value.includes('://') || value.includes('/') || value.includes('\\')) { return reject('it contains a scheme or path separator'); }
+        if (/[?#]/.test(value)) { return reject('it contains a query or fragment character'); }
+        if (/\s/.test(value)) { return reject('it contains whitespace'); }
+
+        // Bracketed IPv6 literal, e.g. [::1]
+        if (value[0] === '[') {
+            if (!/^\[[0-9A-Fa-f:.]+\]$/.test(value)) { return reject('it is not a valid bracketed IPv6 literal'); }
+            return { host: value };
+        }
+
+        const colons = (value.match(/:/g) || []).length;
+        // Two or more colons can only be a bare IPv6 literal; bracket it so the
+        // authority is unambiguous.
+        if (colons >= 2) {
+            if (!/^[0-9A-Fa-f:.]+$/.test(value)) { return reject('it is not a valid IPv6 literal'); }
+            return { host: `[${value}]` };
+        }
+        if (colons === 1) { return reject('it includes a port'); }
+
+        // Hostnames, IPv4, Docker container names and short container IDs. The
+        // underscore is deliberate: Docker names use it and 1.1.4 exists because
+        // stricter parsing rejected them.
+        if (!/^[A-Za-z0-9._-]+$/.test(value)) { return reject('it contains characters that are not valid in a hostname'); }
+
+        return { host: value };
+    }
+
     function isLockout(error) {
         if (!error) { return false; }
-        if (error.errc === LOCKOUT_ERRC && /user/.test(String(error.category || ''))) { return true; }
-        return LOCKOUT_PATTERN.test(String(error.message || ''));
+        // Both reads go through the total sanitizer: a raw String() here is the
+        // same crash vector as in describeServerError.
+        if (error.errc === LOCKOUT_ERRC && /user/.test(sanitizeServerText(error.category || ''))) { return true; }
+        return LOCKOUT_PATTERN.test(sanitizeServerText(error.message || ''));
     }
 
     function WebIQNode(config) {
@@ -120,15 +179,24 @@ module.exports = function (RED) {
         const heartbeatProvided = config.heartbeat !== undefined &&
             config.heartbeat !== null &&
             String(config.heartbeat).trim() !== '';
+        // Any positive interval below this is raised to it. Without a floor a
+        // fractional value such as 0.001 is honoured literally and produces a
+        // ping storm - hundreds of frames a second at the server.
+        const minHeartbeatSeconds = 1;
+
         const configuredHeartbeat = heartbeatProvided ? Number(config.heartbeat) : NaN;
         const heartbeatIsValid = Number.isFinite(configuredHeartbeat) && configuredHeartbeat >= 0;
         const heartbeatSeconds = heartbeatIsValid
-            ? Math.min(configuredHeartbeat, maxHeartbeatSeconds)
+            ? (configuredHeartbeat === 0
+                ? 0
+                : Math.min(Math.max(configuredHeartbeat, minHeartbeatSeconds), maxHeartbeatSeconds))
             : defaultHeartbeatSeconds;
         const heartbeatMs = heartbeatSeconds * 1000;
 
         if (heartbeatIsValid && configuredHeartbeat > maxHeartbeatSeconds) {
             node.warn(`Heartbeat of ${configuredHeartbeat}s exceeds the ${maxHeartbeatSeconds}s maximum; using ${maxHeartbeatSeconds}s.`);
+        } else if (heartbeatIsValid && configuredHeartbeat > 0 && configuredHeartbeat < minHeartbeatSeconds) {
+            node.warn(`Heartbeat of ${configuredHeartbeat}s is below the ${minHeartbeatSeconds}s minimum; using ${minHeartbeatSeconds}s. Use 0 to disable the heartbeat entirely.`);
         }
 
         if (heartbeatMs <= 0) {
@@ -164,6 +232,8 @@ module.exports = function (RED) {
 
         if (loginAttemptsIsValid && configuredLoginAttempts > maxConfigurableLoginAttempts) {
             node.warn(`Login attempts of ${configuredLoginAttempts} exceeds the ${maxConfigurableLoginAttempts} maximum; using ${maxConfigurableLoginAttempts}.`);
+        } else if (loginAttemptsIsValid && !Number.isInteger(configuredLoginAttempts)) {
+            node.warn(`Login attempts of ${configuredLoginAttempts} is not a whole number; using ${maxLoginAttempts}.`);
         }
 
         // TLS. Certificate handling is delegated entirely to Node-RED's own
@@ -231,6 +301,9 @@ module.exports = function (RED) {
                 return { error: 'Host is empty or missing.', status: 'host missing' };
             }
 
+            const hostCheck = validateHost(host);
+            if (hostCheck.error) { return hostCheck; }
+
             const portNumber = Number(port);
             if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) {
                 return {
@@ -253,14 +326,8 @@ module.exports = function (RED) {
                 };
             }
 
-            // A bare IPv6 literal has to be bracketed or the authority is ambiguous.
-            let trimmedHost = String(host).trim();
-            if ((trimmedHost.match(/:/g) || []).length >= 2 && trimmedHost[0] !== '[') {
-                trimmedHost = `[${trimmedHost}]`;
-            }
-
             return {
-                url: `${scheme}://${trimmedHost}:${portNumber}/${encodeURIComponent(trimmedProject)}/`
+                url: `${scheme}://${hostCheck.host}:${portNumber}/${encodeURIComponent(trimmedProject)}/`
             };
         }
 
@@ -622,6 +689,18 @@ module.exports = function (RED) {
                 // The latch already painted its own badge and cancelled everything.
                 if (authLatched) { return; }
 
+                // A socket that dies with a login still outstanding spent a
+                // server-side attempt just as surely as one that timed out. Without
+                // this it looked like an ordinary transport drop: fast ladder, no
+                // budget consumed - so a peer that reads the login and hangs up
+                // could be retried forever, defeating the whole lockout protection.
+                if (ctx.pendingLoginId !== null && ctx.failureKind === null) {
+                    ctx.pendingLoginId = null;
+                    ctx.failureKind = 'login-timeout';
+                    loginTimeouts += 1;
+                    node.warn(`WebIQ closed the connection without answering the login (unanswered login ${loginTimeouts}).`);
+                }
+
                 // Preserve the badge whichever path we arrived by. These used to be
                 // repainted to a generic 'disconnected' within milliseconds, so
                 // states the documentation described were never actually observable.
@@ -853,7 +932,12 @@ module.exports = function (RED) {
         }
 
         function scheduleReconnect(overrideDelayMs) {
-            if (reconnectTimer || closing || authLatched) { return; }
+            // activeContext is checked because node.status() can re-enter this node
+            // synchronously: a Status -> Change -> msg.webiq='reconnect' flow can
+            // establish a replacement connection from inside the close handler's own
+            // status call, and the close handler would then carry on and arm a timer
+            // that later tears down the healthy replacement.
+            if (reconnectTimer || closing || authLatched || activeContext) { return; }
 
             const base = typeof overrideDelayMs === 'number' ? overrideDelayMs : reconnectDelay;
 

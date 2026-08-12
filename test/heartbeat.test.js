@@ -40,7 +40,7 @@ test('a half-open link is detected and reconnected instead of staying green', as
     const runtime = createRuntime(registerWebIQConnect);
     const node = createConnectionNode(runtime, server.port, {
         loginTimeout: 5,
-        heartbeat: 0.15
+        heartbeat: 1
     });
     t.after(() => stopConnectionNode(node));
 
@@ -58,7 +58,7 @@ test('a half-open link is detected and reconnected instead of staying green', as
     await waitFor(
         () => node.statuses.some((status) => status.text === 'link stale - reconnecting'),
         'stale-link detection',
-        4000
+        8000
     );
 
     assert.ok(
@@ -70,7 +70,7 @@ test('a half-open link is detected and reconnected instead of staying green', as
     await waitFor(
         () => connections.length >= 2,
         'reconnection after a dead link',
-        6000
+        12000
     );
 });
 
@@ -114,7 +114,7 @@ test('ordinary traffic keeps a link alive even without pongs', async (t) => {
     const runtime = createRuntime(registerWebIQConnect);
     const node = createConnectionNode(runtime, server.port, {
         loginTimeout: 5,
-        heartbeat: 0.15
+        heartbeat: 1
     });
     t.after(() => stopConnectionNode(node));
 
@@ -134,7 +134,7 @@ test('ordinary traffic keeps a link alive even without pongs', async (t) => {
     }, 50);
     t.after(() => clearInterval(chatter));
 
-    await new Promise((resolve) => setTimeout(resolve, 700));
+    await new Promise((resolve) => setTimeout(resolve, 3000));
 
     assert.equal(
         node.statuses.some((status) => status.text === 'link stale - reconnecting'),
