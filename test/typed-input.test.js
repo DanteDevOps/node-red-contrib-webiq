@@ -167,9 +167,8 @@ test('a pre-1.1 node is told it needs migration, not that its JSON is invalid', 
     // How 1.0.x stored it: separate fields, data holding only the request data.
     const node = runtime.create('api-request', {
         cmd: 'io.read',
-        id: 0,
         data: '["DSin", "SInt"]',
-        interval: 0
+        interval: 500
     });
 
     assert.deepEqual(node.statuses[0], { fill: 'red', shape: 'ring', text: 'needs migration' });
@@ -177,7 +176,9 @@ test('a pre-1.1 node is told it needs migration, not that its JSON is invalid', 
     const err = await drive(node, {});
     assert.ok(err instanceof Error);
     assert.match(String(err), /pre-1\.1 layout/);
-    assert.match(String(err), /interval/, 'the removed polling behaviour must be called out');
+    assert.match(String(err), /polled itself every 500 ms/, 'the removed polling behaviour and its real unit must be called out');
+    assert.match(String(err), /every 0.5 s/, 'the Inject equivalent must be given in seconds');
+    assert.match(String(err), /"io.read"/, 'the old command must be quoted back');
     assert.equal(node.sent.length, 0);
 });
 
@@ -197,4 +198,65 @@ test('a request using the reserved id 0 warns but still works', async () => {
     const err = await drive(node, {});
     assert.equal(err, undefined);
     assert.equal(node.sent.length, 1);
+});
+
+test('a legacy node survives a full deploy that strips undeclared properties', async () => {
+    // Node-RED serializes only DECLARED defaults. cmd/interval are now declared as
+    // deprecated fields precisely so the first full deploy after upgrading cannot
+    // erase the record of what the node used to do.
+    const declared = Object.keys({ name: 1, data: 1, dataType: 1, cmd: 1, interval: 1 });
+    const legacy = { cmd: 'io.write', data: '["DSin"]', interval: 500 };
+
+    const afterDeploy = {};
+    for (const key of Object.keys(legacy)) {
+        if (declared.includes(key)) { afterDeploy[key] = legacy[key]; }
+    }
+
+    const runtime = createRuntime(registerApiRequest);
+    const node = runtime.create('api-request', afterDeploy);
+
+    assert.deepEqual(node.statuses[0], { fill: 'red', shape: 'ring', text: 'needs migration' });
+    assert.ok(
+        node.errors.some(({ error }) => /io\.write/.test(String(error))),
+        'the original command must survive the deploy'
+    );
+});
+
+test('a legacy node explains itself at deploy time, with no input wired', async () => {
+    // A 1.0.x node polled itself, so it commonly has nothing on its input and
+    // would otherwise show a bare badge and never say what to do.
+    const runtime = createRuntime(registerApiRequest);
+    const node = runtime.create('api-request', { cmd: 'io.read', data: '["A"]', interval: 500 });
+
+    assert.ok(node.errors.length > 0, 'the explanation must not wait for a message');
+    assert.match(String(node.errors[0].error), /pre-1\.1 layout/);
+});
+
+test('a new node is not mistaken for a legacy one', async () => {
+    // The deprecated fields default to "" in the editor; empty must count as absent.
+    const runtime = createRuntime(registerApiRequest);
+    const node = runtime.create('api-request', {
+        data: '{"cmd":"io.read","id":1,"data":["A"]}',
+        dataType: 'json',
+        cmd: '',
+        interval: ''
+    });
+
+    assert.deepEqual(node.statuses[0], { fill: 'blue', shape: 'dot', text: 'ready' });
+    const err = await drive(node, {});
+    assert.equal(err, undefined);
+});
+
+test('a dynamic request using the reserved id 0 warns once, not per message', async () => {
+    const runtime = createRuntime(registerApiRequest);
+    const node = runtime.create('api-request', { data: 'request', dataType: 'msg' });
+
+    for (let i = 0; i < 3; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        await drive(node, { request: { cmd: 'io.read', id: 0, data: ['A'] } });
+    }
+
+    const warnings = node.warnings.filter((w) => /reserves for its own login/.test(String(w)));
+    assert.equal(warnings.length, 1, 'exactly one warning for a repeated dynamic id 0');
+    assert.equal(node.sent.length, 3, 'and the requests still go through');
 });

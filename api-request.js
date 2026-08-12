@@ -21,28 +21,49 @@ module.exports = function (RED) {
         const dataType = config.dataType || 'json';
         const isStatic = dataType === 'json';
 
-        // The 1.0.x node stored cmd / id / data / interval as separate properties and
-        // its data field held only the request DATA, not a whole request. Reading that
-        // as a modern full-request JSON produces a baffling "not a valid WebIQ
-        // request" error, so name the real problem instead. Not auto-migrated on
-        // purpose: `interval` meant "poll every n seconds", which this node does not
-        // do, so a silent conversion would quietly stop a flow from polling.
-        const isLegacySchema = config.cmd !== undefined || config.interval !== undefined;
+        // The 1.0.x node stored cmd / data / interval as separate properties and its
+        // data field held only the request DATA, not a whole request. Reading that as
+        // a modern full-request JSON produces a baffling "not a valid WebIQ request"
+        // error, so name the real problem instead - and quote the node's own old
+        // values, because after this release those are the only record of what it did.
+        //
+        // Not auto-migrated on purpose: `interval` polled on its own, which this node
+        // does not do, so a silent conversion would quietly stop a flow polling.
+        //
+        // Empty counts as absent: the editor now declares these deprecated fields (so
+        // a full deploy cannot strip them) and gives new nodes "".
+        const legacyValue = (v) => (v === undefined || v === null || v === '' ? null : v);
+        const legacyCmd = legacyValue(config.cmd);
+        const legacyInterval = legacyValue(config.interval);
+        const isLegacySchema = legacyCmd !== null || legacyInterval !== null;
 
         // A static payload is parsed once, at construction: it cannot change between
         // messages, so re-parsing it only buys the chance to report the same fault
         // repeatedly, and a bad value should show on the canvas at deploy time.
         let template = null;
         let templateError = null;
+        let warnedAboutReservedId = false;
 
         if (isLegacySchema) {
-            templateError = new Error(
-                'This API Request node uses the pre-1.1 layout (separate cmd/id/data' +
-                (config.interval !== undefined ? '/interval' : '') +
-                ' fields), which is no longer supported. Open the node and put the whole request into the Data field as JSON, for example ' +
-                '{"cmd":"io.read","id":1,"data":["Tag"]}' +
-                (config.interval !== undefined ? '. The old "interval" polling is not built in; drive the node from an Inject node set to repeat instead.' : '.')
-            );
+            const parts = ['This API Request node uses the pre-1.1 layout, which is no longer supported.'];
+            if (legacyCmd !== null) { parts.push(`Its command was "${legacyCmd}".`); }
+            parts.push(`Open the node and put the whole request into the Data field as JSON, for example {"cmd":"${legacyCmd || 'io.read'}","id":1,"data":${config.data || '["Tag"]'}}.`);
+
+            if (legacyInterval !== null) {
+                // The 1.0.x field was MILLISECONDS - it went straight into
+                // setInterval, and its editor label said "Interval (ms)". Describing
+                // it as seconds would send a user to rebuild a 500 ms poll as a
+                // 500 second one.
+                const ms = Number(legacyInterval);
+                const asSeconds = Number.isFinite(ms) && ms > 0 ? (ms / 1000) : null;
+                parts.push(
+                    Number.isFinite(ms) && ms > 0
+                        ? `It also polled itself every ${ms} ms. There is no built-in polling; drive it from an Inject node set to repeat every ${asSeconds} s.`
+                        : 'Its polling interval was 0 (disabled). There is no built-in polling; use an Inject node if you need it.'
+                );
+            }
+
+            templateError = new Error(parts.join(' '));
         } else if (isStatic) {
             try {
                 template = JSON.parse(config.data || "{}");
@@ -70,6 +91,13 @@ module.exports = function (RED) {
         node.status(templateError
             ? { fill: "red", shape: "ring", text: isLegacySchema ? "needs migration" : "invalid request" }
             : { fill: "blue", shape: "dot", text: "ready" });
+
+        // Report at DEPLOY time, not only when a message arrives. A 1.0.x node polled
+        // itself, so it commonly has nothing wired to its input - it would otherwise
+        // show a bare "needs migration" badge and never say what to do about it.
+        if (templateError) {
+            node.error(templateError.message);
+        }
 
         function clone(value) {
             return RED.util && typeof RED.util.cloneMessage === 'function'
@@ -121,6 +149,14 @@ module.exports = function (RED) {
                 if (problem) {
                     done(new Error(`${dataType}.${config.data} is not a valid WebIQ request: ${problem}.`));
                     return;
+                }
+
+                // The static branch checks this at deploy time; a dynamic source can
+                // only be checked when a value actually arrives. Warned once so a
+                // per-message stream cannot flood the log.
+                if (payload.id === 0 && !warnedAboutReservedId) {
+                    warnedAboutReservedId = true;
+                    node.warn('This request used id 0, which the connection node reserves for its own login. Use a distinct non-zero id so replies can be told apart.');
                 }
 
                 // Clone here too: flow and global context return the STORED object

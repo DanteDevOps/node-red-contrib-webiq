@@ -80,8 +80,11 @@ test('repeated rejections latch and PACE even when the server hangs up each time
     );
 
     assert.equal(stamps.length, 2, 'the configured budget must cap the attempts');
+    // The auth ladder starts at 5s; jitter is downward-only (60-100%), so the
+    // floor is 3s. The transport ladder would be ~1s - that is the thing this
+    // assertion exists to rule out.
     assert.ok(
-        stamps[1] - stamps[0] >= 3500,
+        stamps[1] - stamps[0] >= 2500,
         `retry must climb the auth ladder, not the fast transport ladder (gap was ${stamps[1] - stamps[0]}ms)`
     );
 

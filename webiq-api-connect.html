@@ -194,8 +194,8 @@
         <dt>Heartbeat <span class="property-type">number</span></dt>
         <dd>Seconds between liveness probes, sent only once the connection is
             authenticated. Defaults to <code>30</code>; <code>0</code> disables it.
-            The link is terminated and reconnected once two consecutive probes have gone
-            unanswered - the third interval - with no pong <i>and</i> no other inbound traffic, so a server that is streaming
+            The link is terminated and reconnected after two consecutive intervals with
+            no pong <i>and</i> no other inbound traffic, so a server that is streaming
             data but ignores pings is never treated as dead. Without a heartbeat, a
             connection that drops without a TCP close stays <code>authenticated</code>
             indefinitely and never reconnects.</dd>

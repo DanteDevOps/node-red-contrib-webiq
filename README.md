@@ -117,8 +117,10 @@ request into the **Data** field as JSON:
 { "cmd": "io.read", "id": 1, "data": ["DSin", "SInt"] }
 ```
 
-The old `interval` field polled automatically. There is no built-in polling —
-drive the node from an **Inject** node set to repeat instead.
+The old `interval` field polled automatically and was in **milliseconds**. There is
+no built-in polling — drive the node from an **Inject** node set to repeat. The node
+tells you its own former interval when it reports `needs migration`, so a 500 ms poll
+becomes an Inject repeating every 0.5 s.
 
 Give each API Request node a **distinct, non-zero `id`**. Replies all arrive on
 the connection node's single output, and `id: 0` is reserved for the
@@ -164,7 +166,7 @@ The node's status badge names the problem. The most common ones:
 | `subprotocol rejected` | The server did not accept `smarthmi-connect`. | Usually a reverse proxy stripping the `Sec-WebSocket-Protocol` header. |
 | `server rejected upgrade (HTTP nnn)` | The server refused the WebSocket handshake. | **A wrong Project name is the most likely cause** — the project is part of the connection URL, so an unknown project is refused here, before any login. Shown for **400, 401, 403, 404, 410**; retries every 30 s. Also check host, port and any reverse proxy. |
 | `server unavailable (HTTP nnn)` | The server or proxy is busy or broken, not misconfigured. | Everything else, including **429 and every 5xx**, retries on the normal fast ladder. Usually no action needed. |
-| `link stale - reconnecting` | Two probes went unanswered (detected on the third interval) with no traffic and no pong. | Normal after a network drop — it reconnects automatically. Persistent flapping means the server does not answer pings *and* sends nothing between probes; raise **Heartbeat** rather than disabling it. |
+| `link stale - reconnecting` | Two consecutive probes went unanswered, with no other traffic. | Normal after a network drop — it reconnects automatically. Persistent flapping means the server does not answer pings *and* sends nothing between probes; raise **Heartbeat** rather than disabling it. |
 | `send buffer full` | The server has stopped reading and 1 MB is queued. | Requests are being dropped rather than buffered forever. Check server load. |
 | `disconnected` | No connection; reconnecting with backoff (1 s doubling to 30 s). | Wait, or check the server. |
 

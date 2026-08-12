@@ -15,7 +15,17 @@ RED.nodes.registerType('api-request', {
 }`
         },
         // Absent on nodes created before the typed input existed; those are JSON.
-        dataType: { value: "json" }
+        dataType: { value: "json" },
+
+        // Deprecated 1.0.x properties, declared ONLY so that a full deploy cannot
+        // erase them. Node-RED serializes exactly the declared defaults, so leaving
+        // these out meant the first full deploy after upgrading stripped the very
+        // fields that identify a legacy node and record what it used to do - turning
+        // an actionable "needs migration" into a generic "invalid request" and losing
+        // the original command and polling cadence for good. This editor never writes
+        // them; a new node gets "" and is not treated as legacy.
+        cmd: { value: "" },
+        interval: { value: "" }
     },
     inputs: 1,
     outputs: 1,
