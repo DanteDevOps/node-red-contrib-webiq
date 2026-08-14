@@ -294,9 +294,9 @@ test('a transient HTTP upgrade failure is not treated as a permanent misconfigur
     );
 
     assert.equal(
-        node.errors.some(({ error }) => /check the project name/.test(String(error))),
+        node.errors.some(({ error }) => /check the project name|most likely cause/.test(String(error))),
         false,
-        'a 503 must not be diagnosed as a wrong project name'
+        'a 503 must not be diagnosed as a wrong project name (in old OR current wording)'
     );
 });
 

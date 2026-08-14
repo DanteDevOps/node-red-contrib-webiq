@@ -104,7 +104,14 @@ async function createWebIQServer(onRequest) {
 
     server.on('connection', (socket) => {
         socket.on('message', (raw) => {
-            const request = JSON.parse(raw.toString());
+            // Guarded: a single non-JSON frame must fail one assertion, not
+            // crash the whole test process from inside a ws event handler.
+            let request;
+            try {
+                request = JSON.parse(raw.toString());
+            } catch (_) {
+                return;
+            }
             requests.push(request);
             onRequest({ request, socket, requests });
         });
@@ -141,8 +148,19 @@ function createConnectionNode(runtime, port, overrides = {}) {
 }
 
 async function stopConnectionNode(node) {
-    node.emit('close');
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    // Await the node's own (removed, done) completion signal instead of a
+    // blind sleep - teardown is confirmed, and the suite loses ~1s of
+    // unconditional waiting across its ~40 call sites.
+    await new Promise((resolve) => {
+        const safety = setTimeout(resolve, 2000);
+        if (typeof safety.unref === 'function') { safety.unref(); }
+        try {
+            node.emit('close', false, () => { clearTimeout(safety); resolve(); });
+        } catch (_) {
+            clearTimeout(safety);
+            resolve();
+        }
+    });
 }
 
 module.exports = {

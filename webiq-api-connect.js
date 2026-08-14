@@ -58,12 +58,19 @@ module.exports = function (RED) {
     // Presentation form: bounded for badges, logs and Error messages. Never use
     // this for MATCHING - the cap would silently narrow the test.
     function sanitizeServerText(value) {
-        // Built without any literal control character in the source: writing the
-        // class inline embeds raw bytes and turns this file into a binary blob.
+        // Two deliberate choices here. The filter is built per code point rather
+        // than as a regex character class because editing tools have twice embedded
+        // the class's control characters as raw bytes, turning this file into a
+        // binary blob. And truncation happens while iterating code points, never
+        // via slice(): a slice at a UTF-16 unit boundary can split a surrogate
+        // pair and leave a lone surrogate in a status badge.
         let out = '';
-        for (const ch of coerceServerText(value).slice(0, 200)) {
+        let units = 0;
+        for (const ch of coerceServerText(value)) {
+            if (units >= 200) { break; }
             const c = ch.codePointAt(0);
             out += (c < 32 || c === 127) ? ' ' : ch;
+            units += ch.length;
         }
         return out;
     }
@@ -79,18 +86,26 @@ module.exports = function (RED) {
     // text alone does not close that; the structure has to be bounded too.
     const MAX_FRAME_DEPTH = 64;
 
-    // Iterative on purpose: a recursive depth check would blow the stack on
-    // exactly the input it exists to reject.
+    // Runs on EVERY inbound frame, so it must not allocate. The depth bound is
+    // checked BEFORE descending, which caps recursion at maxDepth + 1 frames
+    // regardless of input - over-deep input returns true without ever being
+    // walked, so recursion here cannot blow the stack. The Array fast path
+    // matters: large io.read replies are arrays of primitives, and this visits
+    // them without creating a single wrapper object or key list.
     function exceedsMaxDepth(value, maxDepth) {
-        const stack = [{ node: value, depth: 0 }];
-        while (stack.length) {
-            const { node: current, depth } = stack.pop();
-            if (current === null || typeof current !== 'object') { continue; }
-            if (depth >= maxDepth) { return true; }
-            const keys = Object.keys(current);
-            for (let i = 0; i < keys.length; i += 1) {
-                stack.push({ node: current[keys[i]], depth: depth + 1 });
+        if (value === null || typeof value !== 'object') { return false; }
+        if (maxDepth <= 0) { return true; }
+        if (Array.isArray(value)) {
+            for (let i = 0; i < value.length; i += 1) {
+                const v = value[i];
+                if (v !== null && typeof v === 'object' && exceedsMaxDepth(v, maxDepth - 1)) { return true; }
             }
+            return false;
+        }
+        const keys = Object.keys(value);
+        for (let i = 0; i < keys.length; i += 1) {
+            const v = value[keys[i]];
+            if (v !== null && typeof v === 'object' && exceedsMaxDepth(v, maxDepth - 1)) { return true; }
         }
         return false;
     }
@@ -171,8 +186,26 @@ module.exports = function (RED) {
     function isCapacityRejection(rawError) {
         const error = normaliseServerError(rawError);
         if (!error || typeof error !== 'object') { return false; }
-        if (/license/i.test(coerceServerText(error.category || ''))) { return true; }
-        return /too many (clients|sessions)/i.test(coerceServerText(error.message || ''));
+        if (/too many (clients|sessions)/i.test(coerceServerText(error.message || ''))) { return true; }
+        // Within the licence category, only the observed seat-exhaustion code
+        // counts. The category alone is NOT enough: an expired or missing licence
+        // is also in this namespace and will never fix itself - classifying it as
+        // capacity would loop logins forever under a 'server full' badge.
+        return error.errc === 4 && /license/i.test(coerceServerText(error.category || ''));
+    }
+
+    // One authoritative copy of the exponential login ladder. It was previously
+    // written out at three call sites and had already drifted (one copy lost the
+    // exponent clamp).
+    function authLadderDelay(initialDelay, maxDelay, attemptCount) {
+        return Math.min(initialDelay * Math.pow(2, Math.max(0, attemptCount - 1)), maxDelay);
+    }
+
+    // Monotonic milliseconds for cooldown arithmetic. Date.now() is wall-clock:
+    // an NTP step backwards would make "time since last reconnect" negative and
+    // jam the escape hatch for the whole jump.
+    function monotonicMs() {
+        return Number(process.hrtime.bigint() / 1000000n);
     }
 
     function isLockout(rawError) {
@@ -221,6 +254,9 @@ module.exports = function (RED) {
             : defaultLoginTimeoutSeconds;
         const loginTimeoutMs = loginTimeoutSeconds * 1000;
 
+        if (loginTimeoutIsValid && configuredLoginTimeout < 1) {
+            node.warn(`Login timeout of ${configuredLoginTimeout}s is shorter than most servers can answer; the node may never authenticate. Values of 1s or more are recommended.`);
+        }
         if (loginTimeoutIsValid && configuredLoginTimeout > maxLoginTimeoutSeconds) {
             node.warn(`Login timeout of ${configuredLoginTimeout}s exceeds the ${maxLoginTimeoutSeconds}s maximum; using ${maxLoginTimeoutSeconds}s.`);
         }
@@ -259,6 +295,8 @@ module.exports = function (RED) {
 
         if (heartbeatIsValid && configuredHeartbeat > maxHeartbeatSeconds) {
             node.warn(`Heartbeat of ${configuredHeartbeat}s exceeds the ${maxHeartbeatSeconds}s maximum; using ${maxHeartbeatSeconds}s.`);
+        } else if (heartbeatProvided && !heartbeatIsValid) {
+            node.warn(`Heartbeat of "${config.heartbeat}" is not a non-negative number; using the ${defaultHeartbeatSeconds}s default.`);
         } else if (heartbeatIsValid && configuredHeartbeat > 0 && configuredHeartbeat < minHeartbeatSeconds) {
             node.warn(`Heartbeat of ${configuredHeartbeat}s is below the ${minHeartbeatSeconds}s minimum; using ${minHeartbeatSeconds}s. Use 0 to disable the heartbeat entirely.`);
         }
@@ -282,7 +320,7 @@ module.exports = function (RED) {
         //
         // Login TIMEOUTS deliberately spend a different budget with a different
         // ending: after the same count of unanswered logins the node drops to one
-        // probe every five minutes instead of latching. Silence usually means the
+        // probe every 60 seconds instead of latching. Silence usually means the
         // server is down or still booting its PLC project - it is not counting
         // attempts, and a terminal latch would leave an unattended gateway dead
         // forever over a transient outage.
@@ -417,14 +455,20 @@ module.exports = function (RED) {
         // timeouts fall back to a slow probe (silence usually means the server is
         // down or booting, and it recovers on its own).
         let loginRejections = 0;
-        let transientLoginFailures = 0; // unanswered logins AND server-full rejections - both transient, neither may latch
+        // Two transient-failure counters, kept separate so log lines and badges
+        // stay truthful: a capacity rejection IS answered, so it must never be
+        // reported as an 'unanswered login'. Their SUM drives the resting
+        // threshold - both classes share the never-latch, probe-gently ending.
+        let unansweredLogins = 0;
+        let capacityRejections = 0;
+        const transientLoginFailures = () => unansweredLogins + capacityRejections;
         let authLatched = false;
         let authLatchReason = null;
 
         // The reconnect control verb is rate-limited: an automated
         // Catch -> change -> reconnect loop would otherwise turn the escape hatch
         // into exactly the login hammer the latch exists to prevent.
-        let lastForcedReconnectAt = 0;
+        let lastForcedReconnectAt = -Infinity; // monotonic ms; -Infinity so the first use always passes
         const reconnectCooldownMs = 60000;
 
         // Cadence of the standing probe once logins have gone unanswered
@@ -467,12 +511,12 @@ module.exports = function (RED) {
                 socket,
                 state: STATE.CONNECTING,
                 pendingLoginId: null,
-                authenticatedAt: null,
                 failureKind: null,
                 upgradePermanent: false,
                 sendDegraded: false,
                 loginAttempted: false,
                 missedHeartbeats: 0,
+                trafficSinceTick: false,
                 timers: { loginTimeout: null, authRetry: null, stability: null, heartbeat: null },
                 handlers: {}
             };
@@ -547,14 +591,18 @@ module.exports = function (RED) {
             // not a whole new budget - if the cause was not actually fixed, the
             // very next rejection re-latches instead of hammering N more times.
             loginRejections = Math.max(0, maxLoginAttempts - 1);
-            transientLoginFailures = 0;
+            unansweredLogins = 0;
+            capacityRejections = 0;
         }
 
         // Any traffic at all proves the link is alive, not just a pong. A WebIQ
         // server that is streaming data but does not answer pings must not be
         // terminated as dead.
         function markAlive(ctx) {
-            if (ctx) { ctx.missedHeartbeats = 0; }
+            if (ctx) {
+                ctx.missedHeartbeats = 0;
+                ctx.trafficSinceTick = true;
+            }
         }
 
         function stopHeartbeat(ctx) {
@@ -569,12 +617,17 @@ module.exports = function (RED) {
 
             stopHeartbeat(ctx);
             ctx.missedHeartbeats = 0;
+            ctx.trafficSinceTick = false;
 
             // Probe immediately so the very first interval already has an answer to
-            // judge. Counting first and probing afterwards meant the counter was
-            // compared before it was incremented, and the link was only declared
-            // stale on the THIRD interval - 90s at the default, where 60s was both
-            // documented and intended. Measured at a 1s interval: 2.998s, now 2.0s.
+            // judge, and count via a per-interval traffic flag rather than a bare
+            // counter. Two earlier attempts got this wrong in opposite directions:
+            // counting after the check needed THREE intervals (~90s at default,
+            // docs promise two), and counting before the check meant an interval
+            // that saw traffic at 29.9s was charged as 'missed' 0.1s later - a link
+            // could die after barely ONE silent interval, and a single pong slower
+            // than one interval killed an idle session. The flag makes a 'miss'
+            // mean exactly one FULL interval with zero inbound traffic.
             try { ctx.socket.ping(); } catch (_) {}
 
             ctx.timers.heartbeat = setInterval(function () {
@@ -585,7 +638,12 @@ module.exports = function (RED) {
                     return;
                 }
 
-                ctx.missedHeartbeats += 1;
+                if (ctx.trafficSinceTick) {
+                    ctx.missedHeartbeats = 0;
+                } else {
+                    ctx.missedHeartbeats += 1;
+                }
+                ctx.trafficSinceTick = false;
 
                 if (ctx.missedHeartbeats >= heartbeatMissThreshold) {
                     stopHeartbeat(ctx);
@@ -627,6 +685,13 @@ module.exports = function (RED) {
                 activeContext = null;
                 clearTimers(stale);
                 detachHandlers(stale);
+                // ws emits 'error' on the NEXT TICK when a CONNECTING socket is
+                // terminated (abortHandshake -> emitErrorAndClose). With every
+                // listener just detached, that becomes an unhandled 'error' event,
+                // which throws and kills the whole runtime - the try/catch below
+                // cannot catch a next-tick emission. A sink listener must outlive
+                // the terminate call.
+                stale.socket.on('error', function () {});
                 try { stale.socket.terminate(); } catch (_) {}
             }
 
@@ -690,7 +755,7 @@ module.exports = function (RED) {
                         throw new Error(`frame nested deeper than ${MAX_FRAME_DEPTH} levels`);
                     }
                 } catch (e) {
-                    node.warn(`Unusable WebIQ frame forwarded as raw data: ${e.message}`);
+                    node.warn(`Unusable WebIQ frame forwarded as raw data: ${sanitizeServerText(e.message)}`);
                     node.send({ payload: data });
                     return;
                 }
@@ -775,11 +840,16 @@ module.exports = function (RED) {
                 // this it looked like an ordinary transport drop: fast ladder, no
                 // budget consumed - so a peer that reads the login and hangs up
                 // could be retried forever, defeating the whole lockout protection.
-                if (ctx.pendingLoginId !== null && ctx.failureKind === null) {
+                if (ctx.pendingLoginId !== null) {
+                    // Charged regardless of any earlier failureKind on this socket:
+                    // a capacity or credential rejection followed by a retry whose
+                    // login the server never answered still spent a real attempt,
+                    // and skipping the charge here let exactly that attempt vanish
+                    // from every budget.
                     ctx.pendingLoginId = null;
                     ctx.failureKind = 'login-timeout';
-                    transientLoginFailures += 1;
-                    node.warn(`WebIQ closed the connection without answering the login (unanswered login ${transientLoginFailures}).`);
+                    unansweredLogins += 1;
+                    node.warn(`WebIQ closed the connection without answering the login (unanswered login ${unansweredLogins}).`);
                 }
 
                 // Preserve the badge whichever path we arrived by. These used to be
@@ -788,11 +858,11 @@ module.exports = function (RED) {
                 if (ctx.failureKind === 'heartbeat-timeout') {
                     node.status({ fill: 'red', shape: 'ring', text: 'link stale - reconnecting' });
                 } else if (ctx.failureKind === 'login-timeout') {
-                    node.status(transientLoginFailures >= maxLoginAttempts
+                    node.status(transientLoginFailures() >= maxLoginAttempts
                         ? { fill: 'red', shape: 'ring', text: 'login unanswered - retrying every 60s' }
                         : { fill: 'red', shape: 'ring', text: 'login timeout' });
                 } else if (ctx.failureKind === 'login-capacity') {
-                    node.status(transientLoginFailures >= maxLoginAttempts
+                    node.status(transientLoginFailures() >= maxLoginAttempts
                         ? { fill: 'yellow', shape: 'ring', text: 'server full - retrying every 60s' }
                         : { fill: 'yellow', shape: 'ring', text: 'server full - reconnecting' });
                 } else if (ctx.failureKind === 'auth-rejected') {
@@ -818,7 +888,7 @@ module.exports = function (RED) {
                     } else if (/ETIMEDOUT|EHOSTUNREACH|ENETUNREACH/.test(cause.code)) {
                         text = 'server unreachable';
                         detail = 'the host did not respond - check the network path and any firewall.';
-                    } else if (/CERT|SELF_SIGNED|DEPTH_ZERO/.test(cause.code)) {
+                    } else if (/CERT|SELF_SIGNED|DEPTH_ZERO|UNABLE_TO_VERIFY|ERR_TLS/.test(cause.code)) {
                         text = 'TLS certificate rejected';
                         detail = 'the server certificate was not trusted - check the tls-config node.';
                     } else if (/subprotocol/i.test(cause.message)) {
@@ -843,12 +913,9 @@ module.exports = function (RED) {
                 // get the resting probe.
                 let delay;
                 if (ctx.failureKind === 'auth-rejected') {
-                    delay = Math.min(
-                        initialAuthRetryDelay * Math.pow(2, Math.max(0, loginRejections - 1)),
-                        maxAuthRetryDelay
-                    );
+                    delay = authLadderDelay(initialAuthRetryDelay, maxAuthRetryDelay, loginRejections);
                 } else if (ctx.failureKind === 'login-timeout' || ctx.failureKind === 'login-capacity') {
-                    delay = transientLoginFailures >= maxLoginAttempts ? restingRetryDelayMs : slowRetryDelay;
+                    delay = transientLoginFailures() >= maxLoginAttempts ? restingRetryDelayMs : slowRetryDelay;
                 } else if (ctx.upgradePermanent === true) {
                     delay = slowRetryDelay;
                 }
@@ -870,7 +937,6 @@ module.exports = function (RED) {
             if (ctx.pendingLoginId === null || message.id !== ctx.pendingLoginId) { return; }
 
             ctx.pendingLoginId = null;
-            ctx.loginAttempted = true;
 
             if (ctx.timers.loginTimeout) {
                 clearTimeout(ctx.timers.loginTimeout);
@@ -878,10 +944,10 @@ module.exports = function (RED) {
             }
 
             if (!message.error) {
-                ctx.authenticatedAt = Date.now();
                 ctx.failureKind = null;
                 loginRejections = 0;
-                transientLoginFailures = 0;
+                unansweredLogins = 0;
+            capacityRejections = 0;
                 if (ctx.timers.authRetry) {
                     clearTimeout(ctx.timers.authRetry);
                     ctx.timers.authRetry = null;
@@ -914,14 +980,12 @@ module.exports = function (RED) {
             // a login. Any JSON login error, whatever its shape, is a rejection.
             const described = describeServerError(message.error);
 
-            // The server telling us to stop must never be answered with another
-            // attempt - that is precisely what keeps a sliding lockout window open.
-            if (isLockout(message.error)) {
-                ctx.failureKind = 'auth-rejected';
-                latchAuthFailure(`the server refused the login: ${described}`);
-                return;
-            }
-
+            // ORDER MATTERS: capacity is classified BEFORE lockout. The lockout
+            // pattern matches bare 'locked'/'blocked' anywhere in a message, so a
+            // seat-exhaustion reply worded as, say, 'all client seats blocked'
+            // would otherwise latch the node terminally over the one condition
+            // that is guaranteed to fix itself.
+            //
             // "Too many clients" is not a credential problem, and after a network
             // drop it is usually this node's OWN previous session still holding the
             // seat until the server's dead-session detection reaps it (observed:
@@ -931,19 +995,16 @@ module.exports = function (RED) {
             // into a condition that cleared on its own at minute 15.
             if (isCapacityRejection(message.error)) {
                 ctx.failureKind = 'login-capacity';
-                transientLoginFailures += 1;
+                capacityRejections += 1;
 
-                const capacityDelay = Math.min(
-                    initialAuthRetryDelay * Math.pow(2, Math.max(0, transientLoginFailures - 1)),
-                    maxAuthRetryDelay
-                );
+                const capacityDelay = authLadderDelay(initialAuthRetryDelay, maxAuthRetryDelay, capacityRejections);
 
                 setState(ctx, STATE.AUTH_RETRY_WAIT, {
                     fill: 'yellow',
                     shape: 'ring',
                     text: `server full - retrying in ${capacityDelay / 1000}s`
                 });
-                node.warn(`WebIQ login rejected ${described} - no free client slot, often a session the server has not yet released after an unclean disconnect. Retrying in ${capacityDelay / 1000}s; this does not count against the login budget.`);
+                node.warn(`WebIQ login rejected ${described} - no free client slot, often a session the server has not yet released after an unclean disconnect. Retrying in ${capacityDelay / 1000}s (server-full reply ${capacityRejections}); this does not count against the login budget.`);
 
                 if (ctx.timers.authRetry) { clearTimeout(ctx.timers.authRetry); }
                 ctx.timers.authRetry = setTimeout(function () {
@@ -951,6 +1012,14 @@ module.exports = function (RED) {
                     ctx.timers.authRetry = null;
                     attemptLogin(ctx);
                 }, capacityDelay);
+                return;
+            }
+
+            // The server telling us to stop must never be answered with another
+            // attempt - that is precisely what keeps a sliding lockout window open.
+            if (isLockout(message.error)) {
+                ctx.failureKind = 'auth-rejected';
+                latchAuthFailure(`the server refused the login: ${described}`);
                 return;
             }
 
@@ -964,10 +1033,7 @@ module.exports = function (RED) {
 
             // Ladder from the NODE-scoped count: a per-socket count restarts at
             // zero when the server hangs up per attempt, and the ladder never climbs.
-            const authRetryDelay = Math.min(
-                initialAuthRetryDelay * Math.pow(2, loginRejections - 1),
-                maxAuthRetryDelay
-            );
+            const authRetryDelay = authLadderDelay(initialAuthRetryDelay, maxAuthRetryDelay, loginRejections);
 
             setState(ctx, STATE.AUTH_RETRY_WAIT, {
                 fill: 'yellow',
@@ -1015,19 +1081,19 @@ module.exports = function (RED) {
                 ctx.pendingLoginId = null;
 
                 ctx.failureKind = 'login-timeout';
-                transientLoginFailures += 1;
+                unansweredLogins += 1;
 
                 // Silence never latches terminally. A server that is down, booting,
                 // or loading a heavy PLC project is not counting login attempts -
                 // a terminal latch here would leave an unattended gateway dead
                 // forever over a transient outage. After the budget, fall back to
-                // one probe every five minutes so a recovered server is picked up
+                // one probe every 60 seconds so a recovered server is picked up
                 // without human help.
-                const resting = transientLoginFailures >= maxLoginAttempts;
+                const resting = transientLoginFailures() >= maxLoginAttempts;
                 node.status(resting
                     ? { fill: 'red', shape: 'ring', text: 'login unanswered - retrying every 60s' }
                     : { fill: 'red', shape: 'ring', text: 'login timeout' });
-                node.error(`No login reply received within ${loginTimeoutSeconds}s (unanswered login ${transientLoginFailures}): the server may be unreachable or slow to answer, or the timeout may be too short for this project.${resting ? ' Falling back to one attempt every 60 seconds until the server answers.' : ''}`);
+                node.error(`No login reply received within ${loginTimeoutSeconds}s (unanswered login ${unansweredLogins}): the server may be unreachable or slow to answer, or the timeout may be too short for this project.${resting ? ' Falling back to one attempt every 60 seconds until the server answers.' : ''}`);
 
                 // terminate(), not close(): this peer just proved unresponsive, and
                 // close() would wait on ws's internal 30s timer for a close frame
@@ -1036,8 +1102,8 @@ module.exports = function (RED) {
             }, loginTimeoutMs);
         }
 
-        // +/-20% jitter, so a site with many gateways does not stampede a WebIQ
-        // server the instant it comes back up.
+        // Downward-only jitter (60-100% of the delay), so a site with many
+        // gateways does not stampede a WebIQ server the instant it comes back up.
         function withJitter(delay) {
             // Jitter DOWNWARD only, 60-100% of the delay. Spreading upward and then
             // clamping piled the whole upper half of the distribution onto the exact
@@ -1048,6 +1114,10 @@ module.exports = function (RED) {
             return Math.round(delay * (0.6 + (Math.random() * 0.4)));
         }
 
+        // Timer policy, deliberate: PROGRESS timers (reconnect, authRetry,
+        // loginTimeout) keep the event loop referenced - a pending reconnect is
+        // work the process must stay alive to do. AUXILIARY timers (heartbeat,
+        // stability, close-grace) are unref'd - they observe, they are not work.
         function scheduleReconnect(overrideDelayMs) {
             // activeContext is checked because node.status() can re-enter this node
             // synchronously: a Status -> Change -> msg.webiq='reconnect' flow can
@@ -1060,7 +1130,13 @@ module.exports = function (RED) {
 
             reconnectTimer = setTimeout(function () {
                 reconnectTimer = null;
-                reconnectDelay = Math.min(reconnectDelay * 2, maxReconnectDelay);
+                // Only a fire that consumed the TRANSPORT ladder advances it.
+                // Override fires (auth/capacity/resting/slow) say nothing about
+                // transport health - doubling on them inflated the first retry
+                // after an ordinary drop to as much as 30s.
+                if (typeof overrideDelayMs !== 'number') {
+                    reconnectDelay = Math.min(reconnectDelay * 2, maxReconnectDelay);
+                }
                 connect();
             }, withJitter(base));
         }
@@ -1103,7 +1179,7 @@ module.exports = function (RED) {
                 // unlatch-and-retry on every message, turning this escape hatch into
                 // the login hammer the latch exists to prevent.
                 if (wantsAction) {
-                    const now = Date.now();
+                    const now = monotonicMs();
                     const sinceLast = now - lastForcedReconnectAt;
                     if (sinceLast < reconnectCooldownMs) {
                         done(new Error(`WebIQ reconnect refused: the last forced reconnect was ${Math.round(sinceLast / 1000)}s ago; wait ${Math.ceil((reconnectCooldownMs - sinceLast) / 1000)}s. This limit protects the account from the server's login-attempt limiter.`));
@@ -1168,6 +1244,15 @@ module.exports = function (RED) {
                 serialized = JSON.stringify(msg.payload);
             } catch (err) {
                 done(new Error(`Could not serialise payload: ${err.message}`));
+                return;
+            }
+
+            // JSON.stringify can also produce NO output without throwing (a
+            // toJSON returning undefined). Buffer.byteLength(undefined) would
+            // then throw synchronously OUT of this handler - unattributable to
+            // the message, invisible to Catch.
+            if (typeof serialized !== 'string') {
+                done(new Error('Could not serialise payload: JSON.stringify produced no output (does the payload have a toJSON that returns undefined?).'));
                 return;
             }
 

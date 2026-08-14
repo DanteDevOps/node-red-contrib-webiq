@@ -44,10 +44,25 @@ module.exports = function (RED) {
         let templateError = null;
         let warnedAboutReservedId = false;
 
+        // One wording for both the deploy-time (static) and per-message
+        // (dynamic) checks - the two copies had already drifted apart once.
+        function warnReservedId() {
+            if (warnedAboutReservedId) { return; }
+            warnedAboutReservedId = true;
+            node.warn('This request uses id 0, which the connection node reserves for its own login. Give each API Request node a distinct non-zero id so replies can be told apart.');
+        }
+
         if (isLegacySchema) {
             const parts = ['This API Request node uses the pre-1.1 layout, which is no longer supported.'];
             if (legacyCmd !== null) { parts.push(`Its command was "${legacyCmd}".`); }
-            parts.push(`Open the node and put the whole request into the Data field as JSON, for example {"cmd":"${legacyCmd || 'io.read'}","id":1,"data":${config.data || '["Tag"]'}}.`);
+            // 1.0.x took the request id from the node's OWN id property (the
+            // source of the old duplicate-node-ID bug), so on an in-place
+            // upgrade it survives as this node's id and can be quoted back. It
+            // cannot be redeclared as an editor default - Node-RED reserves
+            // 'id' - so quoting it here is the only way to preserve it.
+            const legacyRequestId = /^[0-9]+$/.test(String(config.id || '')) ? Number(config.id) : null;
+            if (legacyRequestId !== null) { parts.push(`Its request id was ${legacyRequestId} - keep that number if a downstream flow filters replies by id.`); }
+            parts.push(`Open the node and put the whole request into the Data field as JSON, for example {"cmd":"${legacyCmd || 'io.read'}","id":${legacyRequestId !== null ? legacyRequestId : 1},"data":${config.data || '["Tag"]'}}.`);
 
             if (legacyInterval !== null) {
                 // The 1.0.x field was MILLISECONDS - it went straight into
@@ -55,12 +70,17 @@ module.exports = function (RED) {
                 // it as seconds would send a user to rebuild a 500 ms poll as a
                 // 500 second one.
                 const ms = Number(legacyInterval);
-                const asSeconds = Number.isFinite(ms) && ms > 0 ? (ms / 1000) : null;
-                parts.push(
-                    Number.isFinite(ms) && ms > 0
-                        ? `It also polled itself every ${ms} ms. There is no built-in polling; drive it from an Inject node set to repeat every ${asSeconds} s.`
-                        : 'Its polling interval was 0 (disabled). There is no built-in polling; use an Inject node if you need it.'
-                );
+                if (Number.isFinite(ms) && ms > 0) {
+                    parts.push(`It also polled itself every ${ms} ms. There is no built-in polling; drive it from an Inject node set to repeat every ${ms / 1000} s.`);
+                } else if (ms === 0) {
+                    parts.push('Its polling interval was 0 (disabled). There is no built-in polling; use an Inject node if you need it.');
+                } else {
+                    // A non-numeric interval went straight into setInterval in
+                    // 1.0.x, where it behaves as ~1 ms - that node WAS polling,
+                    // aggressively. Claiming it was disabled would make the user
+                    // rebuild the flow without the poll it depends on.
+                    parts.push(`Its interval property held "${legacyInterval}", which the old runtime fed straight to setInterval - a non-numeric delay behaves as ~1 ms, so this node WAS polling. Recreate the intended cadence with an Inject node set to repeat.`);
+                }
             }
 
             templateError = new Error(parts.join(' '));
@@ -84,7 +104,7 @@ module.exports = function (RED) {
             // the default, so warn rather than reject - refusing would break flows
             // that are working today.
             if (!templateError && template && template.id === 0) {
-                node.warn('This request uses id 0, which the connection node reserves for its own login. Give each API Request node a distinct non-zero id so replies can be told apart.');
+                warnReservedId();
             }
         }
 
@@ -154,9 +174,8 @@ module.exports = function (RED) {
                 // The static branch checks this at deploy time; a dynamic source can
                 // only be checked when a value actually arrives. Warned once so a
                 // per-message stream cannot flood the log.
-                if (payload.id === 0 && !warnedAboutReservedId) {
-                    warnedAboutReservedId = true;
-                    node.warn('This request used id 0, which the connection node reserves for its own login. Use a distinct non-zero id so replies can be told apart.');
+                if (payload.id === 0) {
+                    warnReservedId();
                 }
 
                 // Clone here too: flow and global context return the STORED object

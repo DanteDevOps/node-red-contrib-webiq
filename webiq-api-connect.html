@@ -4,9 +4,37 @@
         color: '#C0DEED',
         defaults: {
             name: { value: "" },
-            host: { value: "" },
-            port: { value: "" },
-            project: { value: "" },
+            host: {
+                value: "",
+                validate: function (v) {
+                    // Mirrors the runtime validateHost(): userinfo, schemes,
+                    // paths, query/fragment, whitespace and embedded ports are
+                    // refused there, so flag them here, before the deploy.
+                    if (!v) { return false; }
+                    if (v.indexOf("@") !== -1) { return false; }
+                    if (v.indexOf("/") !== -1 || v.indexOf("\\") !== -1) { return false; }
+                    if (v.indexOf("?") !== -1 || v.indexOf("#") !== -1) { return false; }
+                    if (/\s/.test(v)) { return false; }
+                    var colons = (v.match(/:/g) || []).length;
+                    if (colons === 1 && v[0] !== "[") { return false; }
+                    return true;
+                }
+            },
+            port: {
+                value: "",
+                validate: function (v) {
+                    var n = Number(v);
+                    return Number.isInteger(n) && n >= 1 && n <= 65535;
+                }
+            },
+            project: {
+                value: "",
+                validate: function (v) {
+                    if (!v) { return false; }
+                    return v.indexOf("/") === -1 && v.indexOf("\\") === -1 &&
+                        v.indexOf("?") === -1 && v.indexOf("#") === -1;
+                }
+            },
             secure: { value: false },
             tls: { value: "", type: "tls-config", required: false },
             loginTimeout: {
@@ -17,7 +45,9 @@
                     // and clamped there.
                     if (v === "" || v === undefined) { return true; }
                     var n = Number(v);
-                    return isFinite(n) && n > 0 && n <= 86400;
+                    // Floor matches the input's min attribute; the runtime also
+                    // warns below 1s, where no real server can answer a login.
+                    return isFinite(n) && n >= 0.1 && n <= 86400;
                 }
             },
             heartbeat: {

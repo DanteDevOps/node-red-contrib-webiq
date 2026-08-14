@@ -177,8 +177,9 @@ test('an unreachable server is named as such, not blamed on the project', async 
         'a transport fault must no longer blame the project'
     );
     assert.equal(
-        node.errors.some(({ error }) => /project may be invalid/.test(String(error))),
-        false
+        node.errors.some(({ error }) => /project may be invalid|most likely cause/.test(String(error))),
+        false,
+        'a transport fault must not blame the project in old OR current wording'
     );
 });
 

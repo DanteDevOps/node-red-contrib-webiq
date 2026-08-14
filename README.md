@@ -93,7 +93,9 @@ Connect node stops connecting until you re-enter them. The node tells you so:
 
 > WebIQ credentials must be re-entered after upgrading to 2.0...
 
-and its status reads `credentials need re-entry`.
+and its status reads `credentials need re-entry`. (If you ran a full deploy before
+opening the node, the old properties are already stripped and the badge reads the
+generic `credentials missing` instead — same cause, same remedy.)
 
 This is deliberate. An automatic fallback was considered and rejected: Node-RED
 serializes only the properties a node declares, and the old `username`/`password`
@@ -163,7 +165,7 @@ The node's status badge names the problem. The most common ones:
 | `credentials need re-entry` | A 1.x node still has its credentials in the flow file. | Open the node, type the username and password in again, redeploy. See *Upgrading from 1.x*. |
 | `credentials missing` | No username/password have been entered. | Open the node and enter them. The node will not send a login without credentials. |
 | `TLS config unresolved` | A TLS configuration is selected but the config node is missing. | The node refuses to connect rather than silently falling back to unencrypted — re-select or recreate the `tls-config` node. |
-| `TLS config invalid` | The selected configuration is not a `tls-config` node. | Its certificate settings could not be applied, so the node refuses rather than connecting without them. Re-select a real `tls-config` node. |
+| `TLS config invalid` | The selected configuration is not a `tls-config` node, **or** it is one whose certificate files failed to load (`valid === false`). | The node refuses rather than connecting without the selected certificates. If it is a real `tls-config` node, fix the certificate/key/CA file paths on it; otherwise re-select a real one. |
 | `host missing` | The Host field is empty. | Fill it in. |
 | `invalid connection settings` | The WebSocket could not be created from these settings at all. | Rare — the host/port combination is malformed in a way the earlier checks did not catch. The node retries every 30 s in case an environment variable or DNS entry fixes it. |
 | `invalid host` | The Host contains URL syntax — userinfo (`@`), a scheme, a path, a query/fragment character, whitespace, or an embedded port. | Enter only the host name or IP; the port belongs in the Port field. Userinfo is rejected because `trusted.example@10.0.0.9` looks like one host but connects to another — and would send your credentials there. |
@@ -177,7 +179,8 @@ The node's status badge names the problem. The most common ones:
 | `server full - retrying in Ns` / `server full - reconnecting` / `server full - retrying every 60s` | WebIQ replied `too many clients`: no free client/licence slot. **After a network drop this is usually your own previous session**, still held by the server until its dead-session detection reaps it. | Usually nothing — this never latches and never spends the login budget; the node keeps retrying gently and logs in by itself the moment the slot frees. To recover faster, delete the stale session in WebIQ's **Active Sessions** panel. |
 | `reconnecting on request` | A `msg.webiq = "reconnect"` control message was accepted. | Transient; the normal connection states follow. |
 | `connection refused` / `host not found` / `server unreachable` | Transport failure before any login was sent. | Check host, port, network path and firewall. Earlier versions reported all of these as `project not found`, which pointed at the wrong field. |
-| `TLS certificate rejected` | The server certificate was not trusted. | Check the `tls-config` node's CA settings. |
+| `TLS certificate rejected` | The server certificate was not trusted (self-signed, unknown CA, missing intermediate). | Check the `tls-config` node's CA settings. |
+| `connection failed` | A pre-login transport failure that matched no specific classification — most commonly the 10 s handshake timeout against a server that accepts TCP but never answers the upgrade. | Check that the server is actually a WebIQ endpoint and that nothing on the path is black-holing traffic. |
 | `subprotocol rejected` | The server did not accept `smarthmi-connect`. | Usually a reverse proxy stripping the `Sec-WebSocket-Protocol` header. |
 | `server rejected upgrade (HTTP nnn)` | The server refused the WebSocket handshake. | **A wrong Project name is the most likely cause** — the project is part of the connection URL, so an unknown project is refused here, before any login. Shown for **400, 401, 403, 404, 410**; retries every 30 s. Also check host, port and any reverse proxy. |
 | `server unavailable (HTTP nnn)` | The server or proxy is busy or broken, not misconfigured. | Everything else, including **429 and every 5xx**, retries on the normal fast ladder. Usually no action needed. |
