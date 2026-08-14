@@ -173,6 +173,7 @@ The node's status badge names the problem. The most common ones:
 | `login unanswered - retrying every 60s` | **Login attempts** logins in a row went unanswered. | The server is probably down or still booting. The node keeps probing every 60 seconds and recovers on its own the moment the server answers — no action needed unless the server should be up. |
 | `login failed (n/N)` | The server rejected the login; *n* of the configured **Login attempts** are used. | Read the warning in the log — it carries WebIQ's own wording, which distinguishes a wrong password from a licence limit or a lockout. Fix the cause before the budget runs out. |
 | `login blocked - fix and redeploy` | The node has stopped trying: WebIQ reported a lockout, or **Login attempts** consecutive logins were rejected. | **Deliberate.** WebIQ counts login attempts and will lock the account — usually the same account your HMI clients use, so a typo here can take out operator screens. Fix the credentials and redeploy, or send `msg.webiq = "reconnect"` — it grants **one** fresh attempt, at most once per 60 s. |
+| `server full - retrying in Ns` / `server full - retrying every 60s` | WebIQ replied `too many clients`: no free client/licence slot. **After a network drop this is usually your own previous session**, still held by the server until its dead-session detection reaps it. | Usually nothing — this never latches and never spends the login budget; the node keeps retrying gently and logs in by itself the moment the slot frees. To recover faster, delete the stale session in WebIQ's **Active Sessions** panel. |
 | `reconnecting on request` | A `msg.webiq = "reconnect"` control message was accepted. | Transient; the normal connection states follow. |
 | `connection refused` / `host not found` / `server unreachable` | Transport failure before any login was sent. | Check host, port, network path and firewall. Earlier versions reported all of these as `project not found`, which pointed at the wrong field. |
 | `TLS certificate rejected` | The server certificate was not trusted. | Check the `tls-config` node's CA settings. |
@@ -182,6 +183,23 @@ The node's status badge names the problem. The most common ones:
 | `link stale - reconnecting` | Two consecutive probes went unanswered, with no other traffic. | Normal after a network drop — it reconnects automatically. Persistent flapping means the server does not answer pings *and* sends nothing between probes; raise **Heartbeat** rather than disabling it. |
 | `send buffer full` | The server has stopped reading and 1 MB is queued. | Requests are being dropped rather than buffered forever. Check server load. |
 | `disconnected` | No connection; reconnecting with backoff (1 s doubling to 30 s). | Wait, or check the server. |
+
+### After a network drop: `too many clients`
+
+When the network between Node-RED and WebIQ fails uncleanly (pulled cable, Wi-Fi
+drop), the server keeps the old, dead session alive until its own detection
+reaps it — observed at roughly **15 minutes** on an X3web. Until then, your
+reconnecting node bounces off the client limit with `too many clients`, because
+the seat is held by its own ghost.
+
+The node handles this on its own: capacity rejections never latch, and it keeps
+retrying gently until the seat frees. If 15 minutes is too long:
+
+- Delete the dead session manually in WebIQ **Setup → Active Sessions**.
+- Raise the reap time with your WebIQ contact. ~15 minutes is suspiciously close
+  to the Linux TCP retransmission timeout (`tcp_retries2 = 15` ≈ 15.4 min), which
+  suggests the server notices dead clients only when TCP gives up, rather than
+  via an application-level ping of its own.
 
 Errors you may see on a message (all trappable with a **Catch** node):
 

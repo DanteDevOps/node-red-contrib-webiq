@@ -161,6 +161,20 @@ module.exports = function (RED) {
         return { host: value };
     }
 
+    // A "no free seat" rejection is transient by nature: most often the server is
+    // still holding this SAME node's previous session after an unclean disconnect
+    // (cable pull, network drop), and frees it once its own dead-session detection
+    // catches up - observed at roughly 15 minutes on an X3web. Observed live frame:
+    // { category: 'shmi:connect:license', errc: 4, message: 'too many clients' }.
+    // Treating this as a credential rejection latched the node terminally over a
+    // condition that fixes itself.
+    function isCapacityRejection(rawError) {
+        const error = normaliseServerError(rawError);
+        if (!error || typeof error !== 'object') { return false; }
+        if (/license/i.test(coerceServerText(error.category || ''))) { return true; }
+        return /too many (clients|sessions)/i.test(coerceServerText(error.message || ''));
+    }
+
     function isLockout(rawError) {
         const error = normaliseServerError(rawError);
         if (!error || typeof error !== 'object') { return false; }
@@ -403,7 +417,7 @@ module.exports = function (RED) {
         // timeouts fall back to a slow probe (silence usually means the server is
         // down or booting, and it recovers on its own).
         let loginRejections = 0;
-        let loginTimeouts = 0;
+        let transientLoginFailures = 0; // unanswered logins AND server-full rejections - both transient, neither may latch
         let authLatched = false;
         let authLatchReason = null;
 
@@ -533,7 +547,7 @@ module.exports = function (RED) {
             // not a whole new budget - if the cause was not actually fixed, the
             // very next rejection re-latches instead of hammering N more times.
             loginRejections = Math.max(0, maxLoginAttempts - 1);
-            loginTimeouts = 0;
+            transientLoginFailures = 0;
         }
 
         // Any traffic at all proves the link is alive, not just a pong. A WebIQ
@@ -764,8 +778,8 @@ module.exports = function (RED) {
                 if (ctx.pendingLoginId !== null && ctx.failureKind === null) {
                     ctx.pendingLoginId = null;
                     ctx.failureKind = 'login-timeout';
-                    loginTimeouts += 1;
-                    node.warn(`WebIQ closed the connection without answering the login (unanswered login ${loginTimeouts}).`);
+                    transientLoginFailures += 1;
+                    node.warn(`WebIQ closed the connection without answering the login (unanswered login ${transientLoginFailures}).`);
                 }
 
                 // Preserve the badge whichever path we arrived by. These used to be
@@ -774,9 +788,13 @@ module.exports = function (RED) {
                 if (ctx.failureKind === 'heartbeat-timeout') {
                     node.status({ fill: 'red', shape: 'ring', text: 'link stale - reconnecting' });
                 } else if (ctx.failureKind === 'login-timeout') {
-                    node.status(loginTimeouts >= maxLoginAttempts
+                    node.status(transientLoginFailures >= maxLoginAttempts
                         ? { fill: 'red', shape: 'ring', text: 'login unanswered - retrying every 60s' }
                         : { fill: 'red', shape: 'ring', text: 'login timeout' });
+                } else if (ctx.failureKind === 'login-capacity') {
+                    node.status(transientLoginFailures >= maxLoginAttempts
+                        ? { fill: 'yellow', shape: 'ring', text: 'server full - retrying every 60s' }
+                        : { fill: 'yellow', shape: 'ring', text: 'server full - reconnecting' });
                 } else if (ctx.failureKind === 'auth-rejected') {
                     // A server that hangs up after rejecting must not erase the
                     // attempt count from the canvas.
@@ -829,8 +847,8 @@ module.exports = function (RED) {
                         initialAuthRetryDelay * Math.pow(2, Math.max(0, loginRejections - 1)),
                         maxAuthRetryDelay
                     );
-                } else if (ctx.failureKind === 'login-timeout') {
-                    delay = loginTimeouts >= maxLoginAttempts ? restingRetryDelayMs : slowRetryDelay;
+                } else if (ctx.failureKind === 'login-timeout' || ctx.failureKind === 'login-capacity') {
+                    delay = transientLoginFailures >= maxLoginAttempts ? restingRetryDelayMs : slowRetryDelay;
                 } else if (ctx.upgradePermanent === true) {
                     delay = slowRetryDelay;
                 }
@@ -863,7 +881,7 @@ module.exports = function (RED) {
                 ctx.authenticatedAt = Date.now();
                 ctx.failureKind = null;
                 loginRejections = 0;
-                loginTimeouts = 0;
+                transientLoginFailures = 0;
                 if (ctx.timers.authRetry) {
                     clearTimeout(ctx.timers.authRetry);
                     ctx.timers.authRetry = null;
@@ -894,17 +912,50 @@ module.exports = function (RED) {
             // here. Real WebIQ never sends one - the project is a URL path segment,
             // so a wrong project is rejected at the HTTP upgrade and never reaches
             // a login. Any JSON login error, whatever its shape, is a rejection.
-            ctx.failureKind = 'auth-rejected';
-            loginRejections += 1;
-
             const described = describeServerError(message.error);
 
             // The server telling us to stop must never be answered with another
             // attempt - that is precisely what keeps a sliding lockout window open.
             if (isLockout(message.error)) {
+                ctx.failureKind = 'auth-rejected';
                 latchAuthFailure(`the server refused the login: ${described}`);
                 return;
             }
+
+            // "Too many clients" is not a credential problem, and after a network
+            // drop it is usually this node's OWN previous session still holding the
+            // seat until the server's dead-session detection reaps it (observed:
+            // ~15 minutes on an X3web). It fixes itself, so it must never latch and
+            // must not spend the credential budget - walking the terminal ladder
+            // here left an unattended gateway latched forever roughly 75 seconds
+            // into a condition that cleared on its own at minute 15.
+            if (isCapacityRejection(message.error)) {
+                ctx.failureKind = 'login-capacity';
+                transientLoginFailures += 1;
+
+                const capacityDelay = Math.min(
+                    initialAuthRetryDelay * Math.pow(2, Math.max(0, transientLoginFailures - 1)),
+                    maxAuthRetryDelay
+                );
+
+                setState(ctx, STATE.AUTH_RETRY_WAIT, {
+                    fill: 'yellow',
+                    shape: 'ring',
+                    text: `server full - retrying in ${capacityDelay / 1000}s`
+                });
+                node.warn(`WebIQ login rejected ${described} - no free client slot, often a session the server has not yet released after an unclean disconnect. Retrying in ${capacityDelay / 1000}s; this does not count against the login budget.`);
+
+                if (ctx.timers.authRetry) { clearTimeout(ctx.timers.authRetry); }
+                ctx.timers.authRetry = setTimeout(function () {
+                    if (!owns(ctx)) { return; }
+                    ctx.timers.authRetry = null;
+                    attemptLogin(ctx);
+                }, capacityDelay);
+                return;
+            }
+
+            ctx.failureKind = 'auth-rejected';
+            loginRejections += 1;
 
             if (loginRejections >= maxLoginAttempts) {
                 latchAuthFailure(`${loginRejections} consecutive rejected logins (last: ${described})`);
@@ -964,7 +1015,7 @@ module.exports = function (RED) {
                 ctx.pendingLoginId = null;
 
                 ctx.failureKind = 'login-timeout';
-                loginTimeouts += 1;
+                transientLoginFailures += 1;
 
                 // Silence never latches terminally. A server that is down, booting,
                 // or loading a heavy PLC project is not counting login attempts -
@@ -972,11 +1023,11 @@ module.exports = function (RED) {
                 // forever over a transient outage. After the budget, fall back to
                 // one probe every five minutes so a recovered server is picked up
                 // without human help.
-                const resting = loginTimeouts >= maxLoginAttempts;
+                const resting = transientLoginFailures >= maxLoginAttempts;
                 node.status(resting
                     ? { fill: 'red', shape: 'ring', text: 'login unanswered - retrying every 60s' }
                     : { fill: 'red', shape: 'ring', text: 'login timeout' });
-                node.error(`No login reply received within ${loginTimeoutSeconds}s (unanswered login ${loginTimeouts}): the server may be unreachable or slow to answer, or the timeout may be too short for this project.${resting ? ' Falling back to one attempt every 60 seconds until the server answers.' : ''}`);
+                node.error(`No login reply received within ${loginTimeoutSeconds}s (unanswered login ${transientLoginFailures}): the server may be unreachable or slow to answer, or the timeout may be too short for this project.${resting ? ' Falling back to one attempt every 60 seconds until the server answers.' : ''}`);
 
                 // terminate(), not close(): this peer just proved unresponsive, and
                 // close() would wait on ws's internal 30s timer for a close frame

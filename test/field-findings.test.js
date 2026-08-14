@@ -379,3 +379,60 @@ test('secure:true against a plaintext server sends nothing, never authenticates'
     assert.equal(server.requests.length, 0, 'no frame may cross when TLS was requested');
     assert.equal(node.statuses.some((s) => s.text === 'authenticated'), false);
 });
+
+// The exact frame captured on the remote rig (Node-RED on a PC, WebIQ on an
+// X3web) after a cable pull: the server still held the node's own previous
+// half-open session, so the fresh login bounced off the client limit.
+const SERVER_FULL = { category: 'shmi:connect:license', errc: 4, message: 'too many clients' };
+
+test('a server-full rejection never latches and self-heals when the seat frees', async (t) => {
+    // loginAttempts: 1 makes this maximally strict - if capacity rejections spent
+    // the credential budget or latched, the very first one would stop the node.
+    let seatFree = false;
+    const server = await createWebIQServer(({ request, socket }) => {
+        if (request.cmd === 'user.login') {
+            socket.send(JSON.stringify(seatFree
+                ? { cmd: 'user.login', id: request.id, data: { loggedIn: true } }
+                : { cmd: 'user.login', id: request.id, data: null, error: SERVER_FULL }));
+        }
+    });
+    t.after(() => server.close());
+
+    const runtime = createRuntime(registerWebIQConnect);
+    const node = createConnectionNode(runtime, server.port, {
+        loginTimeout: 5,
+        heartbeat: 0,
+        loginAttempts: 1
+    });
+    t.after(() => stopConnectionNode(node));
+
+    await waitFor(
+        () => node.statuses.some((s) => /server full - retrying/.test(s.text)),
+        'server-full badge instead of the credential ladder'
+    );
+    assert.ok(
+        node.warnings.some((w) => /does not count against the login budget/.test(String(w))),
+        'the log must say the budget is untouched'
+    );
+
+    // A second rejection proves no latch even at a budget of one.
+    await waitFor(() => server.requests.length >= 2, 'second gentle retry', 10000);
+    assert.equal(
+        node.statuses.some((s) => s.text === 'login blocked - fix and redeploy'),
+        false,
+        'a capacity rejection must never latch'
+    );
+
+    // The seat frees - as it does in the field when the server reaps the dead
+    // session - and the node must log in by itself, with no human involved.
+    seatFree = true;
+    await waitFor(
+        () => node.statuses.some((s) => s.text === 'authenticated'),
+        'self-heal once the seat frees',
+        20000
+    );
+    assert.equal(
+        node.statuses.some((s) => s.text === 'login blocked - fix and redeploy'),
+        false
+    );
+});

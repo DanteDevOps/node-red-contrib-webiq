@@ -205,7 +205,10 @@
             range 1&ndash;20) before the node latches: badge
             <code>login blocked - fix and redeploy</code>, no further attempts. WebIQ
             counts login attempts server-side and can lock the account, and a reply of
-            "too many login attempts" latches immediately. Logins that go
+            "too many login attempts" latches immediately. A <code>too many clients</code> reply (no free licence slot - after a network drop,
+            usually the server still holding this node's own previous session) also
+            never latches and never spends the budget; the node retries gently and
+            recovers when the slot frees. Logins that go
             <i>unanswered</i> never latch - after the same count the node falls back to
             one probe every 60 seconds and recovers on its own when the server answers,
             so a server that is slow to boot cannot permanently strand the node.</dd>
