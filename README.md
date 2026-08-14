@@ -149,9 +149,10 @@ change. Those errors were always happening; they were just invisible.
 
 - **Turn on Secure** if your WebIQ server terminates TLS. 1.x could only speak
   `ws://`, so credentials crossed the network unencrypted.
-- **Leave Heartbeat at 30 s.** If your server does not answer WebSocket pings *and*
-  goes long periods sending nothing, set it to `0` and tell us — but note that
-  disabling it restores the 1.x behaviour where a dead connection is undetectable.
+- **Leave Heartbeat at 30 s.** Field-tested: WebIQ answers WebSocket pings, so an
+  idle connection stays green. If you ever see flapping on a very slow link, *raise*
+  the interval rather than disabling — `0` restores the 1.x behaviour where a dead
+  connection is undetectable.
 
 ## Troubleshooting
 
@@ -172,8 +173,8 @@ The node's status badge names the problem. The most common ones:
 | `login timeout` | No login reply within the timeout. | Raise **Login timeout** — a slow PLC-backed project may need considerably longer. |
 | `login unanswered - retrying every 60s` | **Login attempts** logins in a row went unanswered. | The server is probably down or still booting. The node keeps probing every 60 seconds and recovers on its own the moment the server answers — no action needed unless the server should be up. |
 | `login failed (n/N)` | The server rejected the login; *n* of the configured **Login attempts** are used. | Read the warning in the log — it carries WebIQ's own wording, which distinguishes a wrong password from a licence limit or a lockout. Fix the cause before the budget runs out. |
-| `login blocked - fix and redeploy` | The node has stopped trying: WebIQ reported a lockout, or **Login attempts** consecutive logins were rejected. | **Deliberate.** WebIQ counts login attempts and will lock the account — usually the same account your HMI clients use, so a typo here can take out operator screens. Fix the credentials and redeploy, or send `msg.webiq = "reconnect"` — it grants **one** fresh attempt, at most once per 60 s. |
-| `server full - retrying in Ns` / `server full - retrying every 60s` | WebIQ replied `too many clients`: no free client/licence slot. **After a network drop this is usually your own previous session**, still held by the server until its dead-session detection reaps it. | Usually nothing — this never latches and never spends the login budget; the node keeps retrying gently and logs in by itself the moment the slot frees. To recover faster, delete the stale session in WebIQ's **Active Sessions** panel. |
+| `login blocked - fix and redeploy` | The node has stopped trying: WebIQ reported a lockout, or **Login attempts** consecutive logins were rejected as bad credentials. (`too many clients` and unanswered logins never count toward this.) | **Deliberate.** WebIQ counts login attempts and will lock the account — usually the same account your HMI clients use, so a typo here can take out operator screens. Fix the credentials and redeploy, or send `msg.webiq = "reconnect"` — it grants **one** fresh attempt, at most once per 60 s. |
+| `server full - retrying in Ns` / `server full - reconnecting` / `server full - retrying every 60s` | WebIQ replied `too many clients`: no free client/licence slot. **After a network drop this is usually your own previous session**, still held by the server until its dead-session detection reaps it. | Usually nothing — this never latches and never spends the login budget; the node keeps retrying gently and logs in by itself the moment the slot frees. To recover faster, delete the stale session in WebIQ's **Active Sessions** panel. |
 | `reconnecting on request` | A `msg.webiq = "reconnect"` control message was accepted. | Transient; the normal connection states follow. |
 | `connection refused` / `host not found` / `server unreachable` | Transport failure before any login was sent. | Check host, port, network path and firewall. Earlier versions reported all of these as `project not found`, which pointed at the wrong field. |
 | `TLS certificate rejected` | The server certificate was not trusted. | Check the `tls-config` node's CA settings. |
