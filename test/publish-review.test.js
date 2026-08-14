@@ -240,10 +240,26 @@ test('a truncated astral character cannot leave a lone surrogate in the log', as
 
     await waitFor(() => node.warnings.some((w) => /login rejected/.test(String(w))), 'rejection surfaced');
 
+    // Mutation-verified: with the old slice()-based truncation reinstated, the
+    // lone high surrogate appears MID-warning (the sanitized text is always
+    // followed by ' - attempt N of M...'), so a final-character check could
+    // never fire. Scan by code unit instead of by regex: escape sequences in
+    // this file have been corrupted by tooling twice, char codes cannot be.
+    function hasLoneSurrogate(text) {
+        for (let i = 0; i < text.length; i++) {
+            const c = text.charCodeAt(i);
+            if (c >= 0xD800 && c <= 0xDBFF) {
+                const next = text.charCodeAt(i + 1);
+                if (!(next >= 0xDC00 && next <= 0xDFFF)) { return true; }
+                i += 1;
+            } else if (c >= 0xDC00 && c <= 0xDFFF) {
+                return true;
+            }
+        }
+        return false;
+    }
     for (const w of node.warnings) {
-        const text = String(w);
-        const last = text.charCodeAt(text.length - 1);
-        assert.ok(!(last >= 0xD800 && last <= 0xDBFF), 'no warning may end in a lone surrogate');
+        assert.ok(!hasLoneSurrogate(String(w)), 'no warning may contain an unpaired surrogate anywhere');
     }
 });
 

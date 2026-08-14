@@ -15,8 +15,19 @@
                     if (v.indexOf("/") !== -1 || v.indexOf("\\") !== -1) { return false; }
                     if (v.indexOf("?") !== -1 || v.indexOf("#") !== -1) { return false; }
                     if (/\s/.test(v)) { return false; }
+                    if (v[0] === "[") {
+                        // Mirror the runtime exactly: a bracketed literal must be
+                        // ONLY the literal. "[::1]:8080" carries a port and the
+                        // runtime rejects it, so the editor must flag it too.
+                        return /^\[[0-9A-Fa-f:.]+\]$/.test(v);
+                    }
                     var colons = (v.match(/:/g) || []).length;
-                    if (colons === 1 && v[0] !== "[") { return false; }
+                    if (colons === 1) { return false; }
+                    if (colons >= 2) {
+                        // Bare IPv6 literal: same charset the runtime enforces -
+                        // no zone IDs ("%"), which cannot travel in a ws:// URL.
+                        return /^[0-9A-Fa-f:.]+$/.test(v);
+                    }
                     return true;
                 }
             },
