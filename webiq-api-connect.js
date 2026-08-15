@@ -75,6 +75,20 @@ module.exports = function (RED) {
         return out;
     }
 
+    // A reason for a THROWN value, total by construction: `instanceof` throws on
+    // a revoked Proxy, and reading `.message` can run a throwing getter - either
+    // would escape the very catch block that is quoting the failure. Bounded and
+    // control-stripped because the result lands in Error messages flows replay.
+    function describeThrown(err) {
+        try {
+            return err instanceof Error && typeof err.message === 'string'
+                ? err.message
+                : sanitizeServerText(err);
+        } catch (_) {
+            return '[unprintable value]';
+        }
+    }
+
     // Deepest nesting accepted in a server frame. A WebIQ frame never needs
     // anything close to this.
     //
@@ -1243,7 +1257,10 @@ module.exports = function (RED) {
             try {
                 serialized = JSON.stringify(msg.payload);
             } catch (err) {
-                done(new Error(`Could not serialise payload: ${err.message}`));
+                // A toJSON can throw ANY value - `throw null` here would make
+                // err.message itself throw, past done(), and the message would
+                // never complete.
+                done(new Error(`Could not serialise payload: ${describeThrown(err)}`));
                 return;
             }
 
@@ -1253,6 +1270,27 @@ module.exports = function (RED) {
             // the message, invisible to Catch.
             if (typeof serialized !== 'string') {
                 done(new Error('Could not serialise payload: JSON.stringify produced no output (does the payload have a toJSON that returns undefined?).'));
+                return;
+            }
+
+            // The string can also no longer say what was validated: a Symbol id
+            // or a function-valued data is silently DROPPED by JSON.stringify,
+            // and a custom toJSON can replace the whole request. Re-check the
+            // form that will actually be transmitted, not the object that was
+            // approved - otherwise a frame missing its id goes out while done()
+            // reports success, and the reply can never be correlated.
+            let echo;
+            try {
+                echo = JSON.parse(serialized);
+            } catch (err) {
+                done(new Error(`Could not serialise payload: the serialised form is not parseable JSON (${describeThrown(err)}).`));
+                return;
+            }
+            if (
+                echo === null || typeof echo !== 'object' || Array.isArray(echo) ||
+                !echo.cmd || echo.id === undefined || echo.data === undefined
+            ) {
+                done(new Error('Payload fields were lost in serialisation: the frame that would be sent is missing cmd, id or data, or its cmd serialised to an empty or zero value. A Symbol or function value disappears in JSON, and a custom toJSON replaces the object it is on.'));
                 return;
             }
 

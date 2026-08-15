@@ -3,26 +3,9 @@
 // to mirror the runtime's validation - every divergence found in review was in
 // exactly this mirror.
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 const test = require('node:test');
 
-function extractEditorDefaults(htmlFile, typeName) {
-    const html = fs.readFileSync(path.join(__dirname, '..', htmlFile), 'utf8');
-    const match = html.match(
-        new RegExp("RED\\.nodes\\.registerType\\('" + typeName + "', \\{[\\s\\S]*?\\n    \\}\\);")
-    );
-    assert.ok(match, `registerType block for ${typeName} not found`);
-
-    let captured;
-    const RED = { nodes: { registerType: (_n, def) => { captured = def; } } };
-    // Minimal jQuery stand-in for oneditprepare references at definition time.
-    const $ = () => ({ val: () => '', on: () => {}, prop: () => {}, is: () => false, toggle: () => {} });
-    // eslint-disable-next-line no-eval
-    eval(match[0]);
-    void $;
-    return captured.defaults;
-}
+const { extractEditorNode, extractEditorDefaults, dialogWithData } = require('./support/editor');
 
 test('connect-node editor validators mirror the runtime rules', () => {
     const d = extractEditorDefaults('webiq-api-connect.html', 'webiq-api-connect');
@@ -63,6 +46,10 @@ test('connect-node editor validators mirror the runtime rules', () => {
 
         ['project', 'test-project', true],
         ['project', '', false],
+        // whitespace-only fails at deploy ("project missing"), so the editor
+        // must refuse it too
+        ['project', ' ', false],
+        ['project', '  \t ', false],
         ['project', 'a/b', false],
         ['project', 'a?b', false],
 
@@ -81,7 +68,11 @@ test('connect-node editor validators mirror the runtime rules', () => {
         ['loginAttempts', '', true],
         ['loginAttempts', '5', true],
         ['loginAttempts', '0', false],
-        ['loginAttempts', '21', false]
+        ['loginAttempts', '21', false],
+        // the runtime floors fractions (with a warning); the editor refuses
+        // them so the deployed value is always the one the user typed
+        ['loginAttempts', '2.5', false],
+        ['loginAttempts', 2.5, false]
     ];
 
     for (const [field, value, expect] of cases) {
@@ -90,5 +81,42 @@ test('connect-node editor validators mirror the runtime rules', () => {
             expect,
             `${field} validate(${JSON.stringify(value)}) must be ${expect}`
         );
+    }
+});
+
+test('request-node editor declares the deprecated markers and clears them on save', () => {
+    const def = extractEditorNode('api-request.html', 'api-request');
+
+    // Declared so a full deploy cannot strip them (removing these declarations
+    // reintroduces the 1.0.x migration-data loss fixed in c741ee0) ...
+    assert.deepEqual(def.defaults.cmd, { value: '' });
+    assert.deepEqual(def.defaults.interval, { value: '' });
+    assert.equal(def.defaults.dataType.value, 'json');
+    const example = JSON.parse(def.defaults.data.value);
+    assert.ok(example.cmd && example.id !== undefined && example.data !== undefined,
+        'the default Data must itself be a valid request');
+
+    // ... and cleared on save once the pending Data is a complete request, or
+    // the dialog writes them back unchanged forever and a legacy node can never
+    // complete the documented migration.
+    assert.equal(typeof def.oneditsave, 'function',
+        'without an oneditsave the legacy markers survive every edit');
+
+    // oneditsave runs BEFORE the pane copies the inputs, so it reads the
+    // pending value from the DOM; `this` still holds the pre-edit properties.
+    const cases = [
+        // [pending type, pending value, must clear?]
+        ['json', '{"cmd":"io.write","id":7,"data":["DSin"]}', true, 'a complete request'],
+        ['msg', 'request', true, 'a dynamic source'],
+        ['json', '["DSin"]', false, 'the untouched 1.0.x fragment (inspect-only Done)'],
+        ['json', '{"cmd":"io.write","id":7', false, 'a JSON typo'],
+        ['json', '{"cmd":"io.write"}', false, 'an incomplete request']
+    ];
+    for (const [type, value, mustClear, label] of cases) {
+        const cleared = extractEditorNode('api-request.html', 'api-request', dialogWithData(type, value));
+        const dialog = { cmd: 'io.write', interval: 500, data: '["DSin"]' };
+        cleared.oneditsave.call(dialog);
+        assert.equal(dialog.cmd === '' && dialog.interval === '', mustClear,
+            `saving over ${label} must ${mustClear ? '' : 'NOT '}clear the legacy markers`);
     }
 });

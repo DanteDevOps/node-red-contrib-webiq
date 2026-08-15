@@ -38,6 +38,43 @@ RED.nodes.registerType('api-request', {
             typeField: "#node-input-dataType",
             types: ["json", "msg", "flow", "global", "env"]
         });
+    },
+    oneditsave: function() {
+        // The deprecated fields have no bound inputs, so the editor would write
+        // them back unchanged forever and the node could never leave its legacy
+        // state through the dialog - the exact migration the "needs migration"
+        // error tells the user to perform. But clear them ONLY once the pending
+        // Data value is a complete request (or comes from a dynamic source): an
+        // inspect-only Done, or one saving a typo, must not destroy the only
+        // record of what the 1.0.x node did. oneditsave runs before the pane
+        // copies the inputs, so the pending value has to come from the DOM -
+        // this.data still holds the pre-edit value here.
+        var pendingType;
+        var pendingValue;
+        try {
+            pendingType = $("#node-input-data").typedInput("type");
+            pendingValue = $("#node-input-data").typedInput("value");
+        } catch (e) {
+            return; // dialog inputs unavailable; keep the markers
+        }
+        var migrated = false;
+        if (pendingType && pendingType !== "json") {
+            // A dynamic source supplies the whole request at runtime; switching
+            // to one is itself a completed migration.
+            migrated = true;
+        } else {
+            try {
+                var parsed = JSON.parse(pendingValue);
+                migrated = Boolean(parsed && typeof parsed === "object" && !Array.isArray(parsed) &&
+                    parsed.cmd && parsed.id !== undefined && parsed.data !== undefined);
+            } catch (e2) {
+                migrated = false;
+            }
+        }
+        if (migrated) {
+            this.cmd = "";
+            this.interval = "";
+        }
     }
 });
 </script>

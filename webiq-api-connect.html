@@ -41,7 +41,9 @@
             project: {
                 value: "",
                 validate: function (v) {
-                    if (!v) { return false; }
+                    // Whitespace-only is refused at deploy ("project missing"),
+                    // so refuse it here too.
+                    if (!v || !String(v).trim()) { return false; }
                     return v.indexOf("/") === -1 && v.indexOf("\\") === -1 &&
                         v.indexOf("?") === -1 && v.indexOf("#") === -1;
                 }
@@ -76,10 +78,12 @@
             loginAttempts: {
                 value: 5,
                 validate: function (v) {
-                    // Must agree with the runtime clamp: 1..20, empty means 5.
+                    // Must agree with the runtime clamp: a whole number 1..20,
+                    // empty means 5. The runtime floors fractions with a warning;
+                    // refusing them here keeps editor and runtime in agreement.
                     if (v === "" || v === undefined) { return true; }
                     var n = Number(v);
-                    return isFinite(n) && n >= 1 && n <= 20;
+                    return Number.isInteger(n) && n >= 1 && n <= 20;
                 }
             }
         },

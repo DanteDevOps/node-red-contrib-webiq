@@ -10,8 +10,27 @@ function createRuntime(registerNode) {
         // the plumbing - callback shape, error routing, validation - not Node-RED's
         // real evaluation semantics; the opt-in node-red-runtime test covers those.
         util: {
+            // Faithful to @node-red/util, not a friendly JSON round-trip: the
+            // real cloneMessage deletes a falsy top-level req/res, keeps a
+            // truthy one BY REFERENCE, and clones recursively (so deep values
+            // overflow the stack). The friendly stub masked two real bugs.
             cloneMessage(value) {
-                return JSON.parse(JSON.stringify(value));
+                if (value === null || typeof value !== 'object') { return value; }
+                const deep = (v) => {
+                    if (v === null || typeof v !== 'object') { return v; }
+                    if (Array.isArray(v)) { return v.map(deep); }
+                    const out = {};
+                    for (const k of Object.keys(v)) { out[k] = deep(v[k]); }
+                    return out;
+                };
+                const req = value.req;
+                const res = value.res;
+                delete value.req;
+                delete value.res;
+                const cloned = deep(value);
+                if (req) { value.req = req; cloned.req = req; }
+                if (res) { value.res = res; cloned.res = res; }
+                return cloned;
             },
             evaluateNodeProperty(value, type, node, msg, callback) {
                 let result;

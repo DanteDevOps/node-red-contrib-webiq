@@ -131,14 +131,24 @@ request into the **Data** field as JSON:
 { "cmd": "io.read", "id": 1, "data": ["DSin", "SInt"] }
 ```
 
+Once the whole request is in the **Data** field (or the type is switched to a
+dynamic source), saving the dialog clears the old fields — that save *is* the
+migration, and the node reports `ready` on the next deploy. A save that leaves
+Data unmigrated — closing the dialog after just reading it, or saving a JSON
+typo — keeps the old fields and the `needs migration` guidance intact.
+
 The old `interval` field polled automatically and was in **milliseconds**. There is
 no built-in polling — drive the node from an **Inject** node set to repeat. The node
 tells you its own former interval when it reports `needs migration`, so a 500 ms poll
-becomes an Inject repeating every 0.5 s.
+becomes an Inject repeating every 0.5 s. (An interval that was not a positive number
+never polled at all — 1.0.x ignored it — and the message says so.)
 
 Give each API Request node a **distinct, non-zero `id`**. Replies all arrive on
 the connection node's single output, and `id: 0` is reserved for the
-connection's own login — a node using it warns on deploy.
+connection's own login — a node using it warns on deploy. If a downstream flow
+filters replies by id, keep the id the migration message quotes back: 1.0.x
+derived the request id from the node's own id, so a generated hex id sent its
+leading digits on the wire (and one starting with a letter sent `null`).
 
 ### Step 2 — expect Catch nodes to start firing (behaviour change)
 

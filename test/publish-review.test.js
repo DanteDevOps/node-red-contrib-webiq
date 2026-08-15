@@ -112,6 +112,196 @@ test('a payload whose toJSON returns undefined fails via done, not a throw', asy
     assert.match(String(done), /produced no output/);
 });
 
+test('fields lost in serialisation fail via done instead of sending a reduced frame', async (t) => {
+    // JSON.stringify silently drops a Symbol id or a function-valued data, and
+    // a custom toJSON can replace the whole request; all three used to go out
+    // on the wire as reduced frames while done() reported success. Validation
+    // must apply to the transmitted form, not the approved object.
+    const arrived = [];
+    const server = await createWebIQServer(({ request, socket }) => {
+        if (request.cmd === 'user.login') {
+            socket.send(JSON.stringify({ cmd: 'user.login', id: request.id, data: { loggedIn: true } }));
+            return;
+        }
+        arrived.push(request);
+    });
+    t.after(() => server.close());
+
+    const runtime = createRuntime(registerWebIQConnect);
+    const node = createConnectionNode(runtime, server.port, { loginTimeout: 5, heartbeat: 0 });
+    t.after(() => stopConnectionNode(node));
+    await waitFor(() => node.statuses.some((s) => s.text === 'authenticated'), 'authenticated');
+
+    const failures = [];
+    for (const payload of [
+        { cmd: 'io.read', id: Symbol('req'), data: [] },
+        { cmd: 'io.read', id: 4, data: function () {} },
+        { cmd: 'io.read', id: 5, data: [], toJSON: () => ({ oops: true }) }
+    ]) {
+        node.emit('input', { payload }, undefined, (err) => failures.push(err));
+    }
+    assert.equal(failures.length, 3, 'each malformed payload must complete synchronously');
+    for (const err of failures) {
+        assert.ok(err instanceof Error, 'a reduced frame must fail via done');
+        assert.match(String(err), /lost in serialisation/);
+    }
+
+    let controlErr = new Error('control done never called');
+    node.emit('input', { payload: { cmd: 'io.read', id: 6, data: [] } }, undefined, (err) => { controlErr = err; });
+    await waitFor(() => arrived.length > 0, 'the well-formed control frame arrives');
+    assert.equal(controlErr, undefined);
+    assert.equal(arrived.length, 1, 'only the well-formed frame may reach the server');
+    assert.deepEqual(arrived[0], { cmd: 'io.read', id: 6, data: [] });
+});
+
+test('a toJSON that throws a non-Error fails via done with the thrown value', async (t) => {
+    // done(new Error(`... ${err.message}`)) on a thrown null used to raise a
+    // secondary TypeError before done() was reached: no frame, no completion,
+    // and the surfaced error named neither.
+    const server = await createWebIQServer(loginOk);
+    t.after(() => server.close());
+
+    const runtime = createRuntime(registerWebIQConnect);
+    const node = createConnectionNode(runtime, server.port, { loginTimeout: 5, heartbeat: 0 });
+    t.after(() => stopConnectionNode(node));
+    await waitFor(() => node.statuses.some((s) => s.text === 'authenticated'), 'authenticated');
+
+    let errNull;
+    assert.doesNotThrow(() => {
+        node.emit('input', {
+            payload: { cmd: 'io.read', id: 7, data: [], toJSON: () => { throw null; } }
+        }, undefined, (err) => { errNull = err; });
+    });
+    assert.ok(errNull instanceof Error, 'throw null must still complete the message');
+    assert.match(String(errNull), /Could not serialise payload: null/);
+
+    let errString;
+    node.emit('input', {
+        payload: { cmd: 'io.read', id: 8, data: [], toJSON: () => { throw 'boom'; } }
+    }, undefined, (err) => { errString = err; });
+    assert.ok(errString instanceof Error);
+    assert.match(String(errString), /boom/, 'the thrown value must survive into the error');
+    assert.doesNotMatch(String(errString), /undefined/);
+
+    // The reason extraction itself must be total: reading .message can run a
+    // throwing getter, and `instanceof` throws on a revoked Proxy - either
+    // secondary throw used to escape the catch block that was quoting the
+    // first one, and done() was never reached.
+    const evil = new Error('x');
+    Object.defineProperty(evil, 'message', { get() { throw new TypeError('secondary'); } });
+    let errGetter;
+    assert.doesNotThrow(() => {
+        node.emit('input', {
+            payload: { cmd: 'io.read', id: 12, data: [], toJSON: () => { throw evil; } }
+        }, undefined, (err) => { errGetter = err; });
+    });
+    assert.ok(errGetter instanceof Error, 'a throwing message getter must still complete the message');
+    assert.match(String(errGetter), /Could not serialise payload/);
+
+    const revocable = Proxy.revocable({}, {});
+    revocable.revoke();
+    let errProxy;
+    assert.doesNotThrow(() => {
+        node.emit('input', {
+            payload: { cmd: 'io.read', id: 13, data: [], toJSON: () => { throw revocable.proxy; } }
+        }, undefined, (err) => { errProxy = err; });
+    });
+    assert.ok(errProxy instanceof Error, 'a revoked Proxy must still complete the message');
+
+    // And the quoted reason is presentation text: bounded, control-stripped.
+    const esc = String.fromCharCode(27);
+    let errHuge;
+    node.emit('input', {
+        payload: { cmd: 'io.read', id: 14, data: [], toJSON: () => { throw 'A'.repeat(1000000) + esc + '[31mforged'; } }
+    }, undefined, (err) => { errHuge = err; });
+    assert.ok(errHuge instanceof Error);
+    assert.ok(String(errHuge).length < 400, 'a thrown non-Error must be truncated for display');
+    assert.ok(!String(errHuge).includes(esc), 'control bytes must never reach the log');
+});
+
+test('a negative legacy id is quoted in the example, not replaced with 1', async () => {
+    // 1.0.x really sent {"id":-3} for a node id of "-3" (parseInt), and the
+    // message says "keep that number" - so the example right after it must not
+    // swap in a different id. Only 0 (reserved) and NaN need substituting.
+    const runtime = createRuntime(registerApiRequest);
+    const node = runtime.create('api-request', {
+        id: '-3',
+        cmd: 'io.read',
+        data: '["A"]',
+        interval: ''
+    });
+
+    const text = String(node.errors[0] && node.errors[0].error);
+    assert.match(text, /request id was -3/);
+    assert.match(text, /"id":-3/, 'the example must keep the historical negative id');
+});
+
+test('a request using req/res keys is cloned intact and isolated per message', async () => {
+    // RED.util.cloneMessage clones MESSAGES: it deletes a falsy top-level req
+    // and shares a truthy res by reference across every clone. Applied to a
+    // request object, that silently dropped fields and let one message's
+    // downstream mutation corrupt the next - the exact hazard the per-message
+    // clone exists to prevent.
+    const runtime = createRuntime(registerApiRequest);
+    const node = runtime.create('api-request', {
+        data: '{"cmd":"io.read","id":9,"data":[],"req":0,"res":{"m":1}}',
+        dataType: 'json'
+    });
+
+    const drive = (msg) => new Promise((resolve) => {
+        node.emit('input', msg, undefined, (err) => resolve(err));
+    });
+    assert.equal(await drive({}), undefined);
+    assert.equal(await drive({}), undefined);
+
+    const [first, second] = node.sent.map((m) => m.payload);
+    assert.equal(first.req, 0, 'a falsy req must survive the clone');
+    assert.notEqual(first.res, second.res, 'res must be cloned per message, never shared');
+    first.res.m = 'corrupted-downstream';
+    assert.equal(second.res.m, 1, 'mutating one message must not corrupt another');
+});
+
+test('a value the clone cannot handle fails via done, not a skipped completion', async () => {
+    // structuredClone throws on a function value; unguarded, the throw escaped
+    // the input handler and done() was never called - the message hung
+    // incomplete with the error attributed to nothing.
+    const runtime = createRuntime(registerApiRequest);
+    const node = runtime.create('api-request', { data: 'request', dataType: 'msg' });
+
+    let err;
+    assert.doesNotThrow(() => {
+        node.emit('input', {
+            request: { cmd: 'io.read', id: 11, data: { fn: () => {} } }
+        }, undefined, (e) => { err = e; });
+    });
+    assert.ok(err instanceof Error, 'an uncloneable request must fail via done');
+    assert.match(String(err), /Could not clone/);
+    assert.equal(node.sent.length, 0);
+});
+
+test('a pathologically nested Data field ends in an attributable error, never a skipped completion', async () => {
+    // Deploy-time validation used to pass a deeply nested (valid JSON) request
+    // that the per-message clone then threw on, skipping done(). Engine limits
+    // vary, so the invariant tested is: however deep, the node either works or
+    // fails via templateError/done - an input never leaves without completing.
+    const depth = 200000;
+    const deep = '{"a":'.repeat(depth) + '1' + '}'.repeat(depth);
+    const runtime = createRuntime(registerApiRequest);
+    const node = runtime.create('api-request', {
+        data: `{"cmd":"io.read","id":10,"data":${deep}}`,
+        dataType: 'json'
+    });
+
+    let err;
+    assert.doesNotThrow(() => {
+        node.emit('input', {}, undefined, (e) => { err = e; });
+    });
+    if (node.sent.length === 0) {
+        assert.ok(err instanceof Error, 'an unsendable deep request must fail via done');
+        assert.equal(node.statuses[0].fill, 'red', 'and show on the canvas at deploy time');
+    }
+});
+
 test('an interval that saw traffic is never counted as missed', async (t) => {
     // The previous counting compared a bare counter at each tick, so traffic at
     // 29.9s was charged as a miss 0.1s later and a link could die after barely
@@ -289,7 +479,11 @@ test('a sub-second login timeout warns that it may never authenticate', () => {
     node.emit('close');
 });
 
-test('a non-numeric legacy interval is reported as polling, never as disabled', async () => {
+test('a non-numeric legacy interval is reported as never polled', async () => {
+    // The shipped 1.0.x code guarded polling with `config.interval > 0`, so a
+    // non-numeric or negative value never reached setInterval. (Verified by
+    // executing the published 1.0.x package; an earlier 2.0.0 draft claimed the
+    // opposite and this test enforced the error.)
     const runtime = createRuntime(registerApiRequest);
     const node = runtime.create('api-request', {
         cmd: 'io.read',
@@ -298,7 +492,8 @@ test('a non-numeric legacy interval is reported as polling, never as disabled', 
     });
 
     const text = String(node.errors[0] && node.errors[0].error);
-    assert.match(text, /WAS polling/, 'the old runtime fed NaN to setInterval (~1ms polling)');
+    assert.match(text, /never polled/, 'interval > 0 rejected "5,0"; the node did not poll');
+    assert.doesNotMatch(text, /WAS polling/);
     assert.doesNotMatch(text, /was 0 \(disabled\)/);
 });
 
@@ -315,4 +510,37 @@ test('a numeric 1.0.x node id is quoted back as the legacy request id', async ()
     const text = String(node.errors[0] && node.errors[0].error);
     assert.match(text, /request id was 7/);
     assert.match(text, /"id":7/, 'the example must use the recovered id');
+});
+
+test('a generated hex 1.0.x node id recovers the decimal prefix 1.0.x sent', async () => {
+    // 1.0.x did parseInt(config.id, 10) on the node's own hex id, so
+    // "738399a874eef1da" put 738399 on the wire - not 1, and not the full id.
+    const runtime = createRuntime(registerApiRequest);
+    const node = runtime.create('api-request', {
+        id: '738399a874eef1da',
+        cmd: 'io.read',
+        data: '["A"]',
+        interval: ''
+    });
+
+    const text = String(node.errors[0] && node.errors[0].error);
+    assert.match(text, /request id was 738399/);
+    assert.match(text, /"id":738399/, 'the example must use the historical wire id');
+});
+
+test('a letter-leading 1.0.x node id is reported as null on the wire', async () => {
+    // parseInt("a8b1...", 10) is NaN, and JSON.stringify({id: NaN}) puts
+    // "id":null in the frame - a downstream filter was matching null, and the
+    // guidance must say so rather than silently suggesting a new id.
+    const runtime = createRuntime(registerApiRequest);
+    const node = runtime.create('api-request', {
+        id: 'a8b1c2d3e4f50617',
+        cmd: 'io.read',
+        data: '["A"]',
+        interval: ''
+    });
+
+    const text = String(node.errors[0] && node.errors[0].error);
+    assert.match(text, /null on the wire/);
+    assert.match(text, /"id":1/, 'with no numeric history, the example falls back to 1');
 });
